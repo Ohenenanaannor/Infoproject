@@ -1,0 +1,21 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+# Ignore virtual environment
+venv/
+ENV/
+env/
+.venv/
+
+# Ignore environment variable file
+.env
+
+# Ignore SQLite database file
+chat4.db
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore system files (optional but recommended)
+.DS_Store
+Thumbs.db
+
