@@ -1,17 +1,51 @@
+import os
+import psycopg2
+import urllib.parse
+import requests
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
-import sqlite3
 from datetime import datetime
-import requests
-import urllib.parse
 import uvicorn
-
-import os
 from dotenv import load_dotenv
+
 load_dotenv()
 
-DB_PATH = "chat4.db"
 app = FastAPI()
+
+# -----------------------------
+# Neon / Postgres
+# -----------------------------
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+def get_pg_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+def ensure_db():
+    conn = get_pg_connection()
+    c = conn.cursor()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS contacts (
+        id SERIAL PRIMARY KEY,
+        phone TEXT UNIQUE,
+        name TEXT
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS messages (
+        id SERIAL PRIMARY KEY,
+        phone TEXT,
+        message TEXT,
+        direction TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        message_type TEXT,
+        media_link TEXT,
+        caption TEXT
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+ensure_db()
 
 # -----------------------------
 # Infobip config
@@ -22,43 +56,12 @@ SENDER_NUMBER = os.getenv("SENDER_NUMBER")
 MEDIA_BASE_URL = "https://api.infobip.com"
 
 # -----------------------------
-# Ensure DB & tables exist
-# -----------------------------
-def ensure_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone TEXT,
-        message TEXT,
-        direction TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-        message_type TEXT,
-        media_link TEXT,
-        caption TEXT
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS contacts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone TEXT UNIQUE,
-        name TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
-
-ensure_db()
-
-# -----------------------------
 # Helpers
 # -----------------------------
 def extract_media_id_from_url(url: str) -> str:
     try:
         parsed = urllib.parse.urlparse(url)
-        last = parsed.path.rstrip("/").split("/")[-1]
-        return last
+        return parsed.path.rstrip("/").split("/")[-1]
     except Exception:
         return url
 
@@ -99,7 +102,7 @@ def parse_infobip_message(msg):
 async def inbound(request: Request):
     payload = await request.json()
     results = payload.get("results", []) or payload.get("messages", [])
-    conn = sqlite3.connect(DB_PATH)
+    conn = get_pg_connection()
     c = conn.cursor()
     received = 0
     for msg in results:
@@ -110,13 +113,13 @@ async def inbound(request: Request):
         # Upsert contact
         c.execute("""
             INSERT INTO contacts (phone, name)
-            VALUES (?, ?)
-            ON CONFLICT(phone) DO UPDATE SET name=excluded.name
+            VALUES (%s, %s)
+            ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
         """, (sender, name))
         # Insert message
         c.execute("""
             INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (sender, text, "inbound", datetime.now(), msg_type, media_id, caption))
         received += 1
     conn.commit()

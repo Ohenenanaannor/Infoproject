@@ -1,6 +1,7 @@
-import streamlit as st
-import sqlite3
+import os
+import psycopg2
 from datetime import datetime
+import streamlit as st
 import requests
 import uuid
 from streamlit_autorefresh import st_autorefresh
@@ -9,12 +10,8 @@ import urllib.parse
 # -----------------------------
 # Configuration
 # -----------------------------
-
-import os
-
 API_ENABLED = True
 try:
-    # Streamlit Cloud
     API_KEY = st.secrets["API_KEY"]
     SANDBOX_NUMBER = st.secrets["SANDBOX_NUMBER"]
     TEXT_API_URL = st.secrets["TEXT_API_URL"]
@@ -22,9 +19,9 @@ try:
     VIDEO_API_URL = st.secrets["VIDEO_API_URL"]
     DOCUMENT_API_URL = st.secrets["DOCUMENT_API_URL"]
     NGROK_URL = st.secrets["NGROK_URL"]
+    DATABASE_URL = st.secrets["DATABASE_URL"]
     FASTAPI_PROXY_BASE = st.secrets["FASTAPI_PROXY_BASE"].rstrip("/")
 except Exception:
-    # Local development
     from dotenv import load_dotenv
     load_dotenv()
     API_KEY = os.getenv("API_KEY")
@@ -35,22 +32,27 @@ except Exception:
     DOCUMENT_API_URL = os.getenv("DOCUMENT_API_URL")
     NGROK_URL = os.getenv("NGROK_URL")
     FASTAPI_PROXY_BASE = os.getenv("FASTAPI_PROXY_BASE")
+    DATABASE_URL = os.getenv("DATABASE_URL")
 
-DB_PATH = "chat4.db"
+
+
 
 # -----------------------------
-# DB connection
+# DB connection helper
 # -----------------------------
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+def get_pg_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+# Ensure tables exist
+conn = get_pg_connection()
 cursor = conn.cursor()
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     phone TEXT,
     message TEXT,
     direction TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     message_type TEXT,
     media_link TEXT,
     caption TEXT
@@ -58,7 +60,7 @@ CREATE TABLE IF NOT EXISTS messages (
 """)
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS contacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id SERIAL PRIMARY KEY,
     phone TEXT UNIQUE,
     name TEXT
 )
@@ -72,7 +74,7 @@ st.set_page_config(page_title="WhatsApp Chat Dashboard", page_icon="💬", layou
 st.title("💬 WhatsApp Chat Dashboard (Live)")
 st_autorefresh(interval=5000, key="refresh")
 
-# Load messages/contacts
+# Load messages and contacts
 cursor.execute("SELECT * FROM messages ORDER BY timestamp ASC")
 messages = cursor.fetchall()
 cursor.execute("SELECT phone, name FROM contacts")
@@ -187,15 +189,15 @@ if st.button("Send"):
             message_body = message_text.strip()
             caption = ""
 
-        # Store locally
+        # Store locally in Postgres
         cursor.execute("""
             INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (recipient, message_body, "outbound", datetime.now(), msg_type, media_link, caption))
         conn.commit()
         st.success("✅ Message saved locally!")
 
-        # Send via Infobip
+        # Send via Infobip API
         if API_ENABLED:
             headers = {
                 "Authorization": f"App {API_KEY}",
