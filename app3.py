@@ -4,13 +4,13 @@ from datetime import datetime
 import streamlit as st
 import requests
 import uuid
-from streamlit_autorefresh import st_autorefresh
 import urllib.parse
+from streamlit_autorefresh import st_autorefresh
+from dotenv import load_dotenv
 
 # -----------------------------
-# Configuration
+# Load Config
 # -----------------------------
-API_ENABLED = True
 try:
     API_KEY = st.secrets["API_KEY"]
     SANDBOX_NUMBER = st.secrets["SANDBOX_NUMBER"]
@@ -22,7 +22,6 @@ try:
     DATABASE_URL = st.secrets["DATABASE_URL"]
     FASTAPI_PROXY_BASE = st.secrets["FASTAPI_PROXY_BASE"].rstrip("/")
 except Exception:
-    from dotenv import load_dotenv
     load_dotenv()
     API_KEY = os.getenv("API_KEY")
     SANDBOX_NUMBER = os.getenv("SANDBOX_NUMBER")
@@ -31,52 +30,68 @@ except Exception:
     VIDEO_API_URL = os.getenv("VIDEO_API_URL")
     DOCUMENT_API_URL = os.getenv("DOCUMENT_API_URL")
     NGROK_URL = os.getenv("NGROK_URL")
-    FASTAPI_PROXY_BASE = os.getenv("FASTAPI_PROXY_BASE")
     DATABASE_URL = os.getenv("DATABASE_URL")
+    FASTAPI_PROXY_BASE = os.getenv("FASTAPI_PROXY_BASE")
 
-
+API_ENABLED = True
 
 
 # -----------------------------
-# DB connection helper
+# Cached DB Initialization
 # -----------------------------
-def get_pg_connection():
-    return psycopg2.connect(DATABASE_URL)
+@st.cache_resource
+def init_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
 
-# Ensure tables exist
-conn = get_pg_connection()
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS messages (
-    id SERIAL PRIMARY KEY,
-    phone TEXT,
-    message TEXT,
-    direction TEXT,
-    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    message_type TEXT,
-    media_link TEXT,
-    caption TEXT
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS contacts (
-    id SERIAL PRIMARY KEY,
-    phone TEXT UNIQUE,
-    name TEXT
-)
-""")
-conn.commit()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS messages (
+        id SERIAL PRIMARY KEY,
+        phone TEXT,
+        message TEXT,
+        direction TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        message_type TEXT,
+        media_link TEXT,
+        caption TEXT
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS contacts (
+        id SERIAL PRIMARY KEY,
+        phone TEXT UNIQUE,
+        name TEXT
+    )
+    """)
+
+    conn.commit()
+    return conn, cursor
+
+
+conn, cursor = init_db()
+
 
 # -----------------------------
 # Streamlit UI
 # -----------------------------
 st.set_page_config(page_title="WhatsApp Chat Dashboard", page_icon="💬", layout="centered")
 st.title("💬 WhatsApp Chat Dashboard (Live)")
-st_autorefresh(interval=5000, key="refresh")
 
-# Load messages and contacts
+# Auto-refresh every 15 seconds instead of 5
+st_autorefresh(interval=15000, key="refresh")
+
+# Manual button refresh
+if st.button("🔄 Refresh Now"):
+    st.rerun()
+
+
+# -----------------------------
+# Load messages & contacts
+# -----------------------------
 cursor.execute("SELECT * FROM messages ORDER BY timestamp ASC")
 messages = cursor.fetchall()
+
 cursor.execute("SELECT phone, name FROM contacts")
 contacts = {phone: name for phone, name in cursor.fetchall()}
 
@@ -88,8 +103,12 @@ selected_display = st.sidebar.selectbox("Select a conversation", contact_display
 st.sidebar.write("---")
 st.sidebar.write("Total contacts:", len(conversation_keys))
 
-selected_phone = "All" if selected_display == "All" else selected_display.split("(")[-1].replace(")","")
-chat_messages = [m for m in messages if selected_phone == "All" or m[1] == selected_phone]
+selected_phone = "All" if selected_display == "All" else selected_display.split("(")[-1].replace(")", "")
+chat_messages = [
+    m for m in messages
+    if selected_phone == "All" or m[1] == selected_phone
+]
+
 
 # -----------------------------
 # Helpers
@@ -98,15 +117,23 @@ def build_proxy_url(media_identifier: str) -> str:
     """Use media proxy for Infobip IDs, or direct URL for public links."""
     if not media_identifier:
         return ""
+
     if media_identifier.startswith("http"):
         return media_identifier
+
     if "/" in media_identifier:
         media_identifier = media_identifier.rstrip("/").split("/")[-1]
+
     encoded = urllib.parse.quote_plus(media_identifier)
     return f"{FASTAPI_PROXY_BASE}/media-proxy/{encoded}"
 
+
 def render_bubble(msg_row, is_inbound):
-    _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
+    (
+        _, phone, message_text, direction,
+        timestamp, msg_type, media_link, caption
+    ) = msg_row
+
     display_name = f"{contacts.get(phone, phone)} ({phone})"
     align = "flex-start" if is_inbound else "flex-end"
     bg = "#ffffff" if is_inbound else "#dcf8c6"
@@ -119,18 +146,21 @@ def render_bubble(msg_row, is_inbound):
     elif msg_type in ("image", "video", "document", "voice", "audio"):
         if media_link:
             proxy = build_proxy_url(media_link)
+
             if msg_type == "image":
                 content_html = f"<a href='{proxy}' target='_blank'><img src='{proxy}' style='max-width:220px; border-radius:8px; border:1px solid #ddd;'></a>"
+
             elif msg_type == "video":
                 content_html = f"<a href='{proxy}' target='_blank'>View Video</a><br><video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
+
             elif msg_type in ("voice", "audio"):
-                content_html = f"<audio controls><source src='{proxy}' type='audio/mpeg'>Your browser does not support audio.</audio>"
+                content_html = f"<audio controls><source src='{proxy}' type='audio/mpeg'></audio>"
+
             elif msg_type == "document":
                 content_html = f"<a href='{proxy}' target='_blank'>Open Document</a>"
+
             if caption:
                 content_html += f"<div style='margin-top:6px'>{caption}</div>"
-        else:
-            content_html = f"<i>{msg_type.capitalize()} (no preview)</i>"
 
     st.markdown(f"""
     <div style='display:flex; justify-content:{align}; margin:8px 0;'>
@@ -142,10 +172,15 @@ def render_bubble(msg_row, is_inbound):
     </div>
     """, unsafe_allow_html=True)
 
+
 # -----------------------------
 # Header
 # -----------------------------
-st.subheader("💬 All Conversations" if selected_phone=="All" else f"💬 Chat with: {contacts.get(selected_phone, selected_phone)} ({selected_phone})")
+st.subheader(
+    "💬 All Conversations" if selected_phone == "All"
+    else f"💬 Chat with: {contacts.get(selected_phone, selected_phone)} ({selected_phone})"
+)
+
 
 # -----------------------------
 # Render messages
@@ -156,25 +191,32 @@ else:
     for m in chat_messages:
         render_bubble(m, m[3] == "inbound")
 
+
 # -----------------------------
 # Send new message
 # -----------------------------
 st.subheader("Send a New WhatsApp Message")
+
 recipient = st.text_input("Recipient number (include country code)")
 message_text = st.text_area("Message (text only)")
 media_url = st.text_input("Image/Video/Document URL (optional, must start with https://)")
 media_caption = st.text_input("Caption (optional)")
 
+
 if st.button("Send"):
     if recipient.strip() and (message_text.strip() or media_url.strip()):
+
         if media_url.strip():
             url_lower = media_url.lower()
+
             if url_lower.endswith((".jpg", ".jpeg", ".png", ".gif")):
                 msg_type = "image"
                 api_url = IMAGE_API_URL
+
             elif url_lower.endswith((".mp4", ".mov", ".webm")):
                 msg_type = "video"
                 api_url = VIDEO_API_URL
+
             else:
                 msg_type = "document"
                 api_url = DOCUMENT_API_URL
@@ -182,6 +224,7 @@ if st.button("Send"):
             media_link = media_url.strip()
             message_body = ""
             caption = media_caption.strip()
+
         else:
             msg_type = "text"
             api_url = TEXT_API_URL
@@ -189,39 +232,51 @@ if st.button("Send"):
             message_body = message_text.strip()
             caption = ""
 
-        # Store locally in Postgres
+        # Save locally
         cursor.execute("""
             INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (recipient, message_body, "outbound", datetime.now(), msg_type, media_link, caption))
+
         conn.commit()
         st.success("✅ Message saved locally!")
 
-        # Send via Infobip API
+        # Send via Infobip
         if API_ENABLED:
             headers = {
                 "Authorization": f"App {API_KEY}",
                 "Content-Type": "application/json",
                 "Accept": "application/json"
             }
+
             message_id = str(uuid.uuid4())
+
             payload = {
                 "from": SANDBOX_NUMBER,
                 "to": recipient,
                 "messageId": message_id,
-                "content": {"text": message_body} if msg_type=="text" else {"mediaUrl": media_link, "caption": caption},
+                "content": (
+                    {"text": message_body}
+                    if msg_type == "text"
+                    else {"mediaUrl": media_link, "caption": caption}
+                ),
                 "callbackData": "Callback data",
                 "notifyUrl": NGROK_URL,
-                "urlOptions": {"shortenUrl": True, "trackClicks": False, "removeProtocol": True}
+                "urlOptions": {
+                    "shortenUrl": True,
+                    "trackClicks": False,
+                    "removeProtocol": True
+                }
             }
 
             try:
                 response = requests.post(api_url, headers=headers, json=payload)
-                if response.status_code in (200,201):
+                if response.status_code in (200, 201):
                     st.success(f"✅ Message sent successfully to {recipient}!")
                 else:
                     st.error(f"❌ API failed: {response.text}")
             except Exception as e:
                 st.error(f"⚠️ Connection error: {e}")
+
     else:
         st.warning("Please fill recipient and message or media URL.")
