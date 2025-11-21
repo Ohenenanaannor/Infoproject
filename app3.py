@@ -12,6 +12,22 @@ from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
 
 load_dotenv()
+import streamlit as st
+try:
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+except Exception:
+    APP_PASSWORD = os.getenv("APP_PASSWORD")
+
+st.set_page_config(page_title="Protected App", layout="centered")
+st.title("🔐 Protected App Login")
+
+password = st.text_input("Enter password:", type="password")
+
+if password != APP_PASSWORD:
+    st.stop()
+
+st.success("🎉 Authenticated! Loading dashboard...")
+
 
 # -----------------------------
 # Config - prefer Streamlit secrets, fallback to env
