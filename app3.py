@@ -39,14 +39,6 @@ except Exception:
     FASTAPI_PROXY_BASE = os.getenv("FASTAPI_PROXY_BASE", "").rstrip("/")
     STREAMLIT_PUBLIC_URL = os.getenv("STREAMLIT_URL", "")
 
-# If you didn't set FASTAPI_PROXY_BASE in secrets/env, use the backend URL you shared:
-if not FASTAPI_PROXY_BASE:
-    FASTAPI_PROXY_BASE = "https://fastapi-whatsapp-backend.onrender.com"
-
-# If you didn't set STREAMLIT_PUBLIC_URL, use the Streamlit URL you shared:
-if not STREAMLIT_PUBLIC_URL:
-    STREAMLIT_PUBLIC_URL = "https://infoproject-iahbcuym4jenzg2swn8jrb.streamlit.app/"
-
 API_ENABLED = True
 
 # -----------------------------
