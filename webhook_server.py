@@ -1,22 +1,30 @@
+# webhook.py
 import os
-import psycopg2
+import logging
 import urllib.parse
 import requests
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from datetime import datetime
-import uvicorn
 from dotenv import load_dotenv
+import psycopg2
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 
-app = FastAPI()
+app = FastAPI(title="WhatsApp Webhook")
 
-# -----------------------------
-# Neon / Postgres
-# -----------------------------
 DATABASE_URL = os.getenv("DATABASE_URL")
+API_KEY = os.getenv("API_KEY")
+SENDER_NUMBER = os.getenv("SENDER_NUMBER")
+MEDIA_BASE_URL = "https://api.infobip.com"
+AUTH_HEADER = f"App {API_KEY}" if API_KEY else None
 
+if not DATABASE_URL:
+    logging.error("DATABASE_URL not set. Exiting.")
+    raise RuntimeError("DATABASE_URL is required")
+
+# simple DB helper (no pool here to keep code small; Render + Neon handle connections)
 def get_pg_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -47,17 +55,12 @@ def ensure_db():
 
 ensure_db()
 
-# -----------------------------
-# Infobip config
-# -----------------------------
-API_KEY = os.getenv("API_KEY")
-AUTH_HEADER = f"App {API_KEY}"  
-SENDER_NUMBER = os.getenv("SENDER_NUMBER")
-MEDIA_BASE_URL = "https://api.infobip.com"
+# health endpoint used by Streamlit pinger
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
-# -----------------------------
-# Helpers
-# -----------------------------
+# helpers
 def extract_media_id_from_url(url: str) -> str:
     try:
         parsed = urllib.parse.urlparse(url)
@@ -82,7 +85,6 @@ def parse_infobip_message(msg):
         t = content.get("text", "")
         text = t.get("body","") if isinstance(t, dict) else str(t or "")
         msg_type = "text"
-
     elif msg_type_raw in ("IMAGE","VIDEO","DOCUMENT","VOICE","AUDIO"):
         msg_type = msg_type_raw.lower()
         caption = content.get("caption","") or ""
@@ -92,45 +94,57 @@ def parse_infobip_message(msg):
             media_identifier = str(media_id)
         elif media_url:
             media_identifier = extract_media_id_from_url(media_url)
+    else:
+        t = content.get("text", "")
+        text = t.get("body","") if isinstance(t, dict) else str(t or "")
+        msg_type = "text"
 
     return text, msg_type, media_identifier, caption, sender, contact_name
 
-# -----------------------------
-# Inbound webhook
-# -----------------------------
+# inbound webhook
 @app.post("/whatsapp/inbound")
 async def inbound(request: Request):
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
     results = payload.get("results", []) or payload.get("messages", [])
+    if not results:
+        return JSONResponse({"status":"ok","received":0})
+
     conn = get_pg_connection()
     c = conn.cursor()
     received = 0
-    for msg in results:
-        parsed = parse_infobip_message(msg)
-        if not parsed:
-            continue
-        text, msg_type, media_id, caption, sender, name = parsed
-        # Upsert contact
-        c.execute("""
-            INSERT INTO contacts (phone, name)
-            VALUES (%s, %s)
-            ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
-        """, (sender, name))
-        # Insert message
-        c.execute("""
-            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (sender, text, "inbound", datetime.now(), msg_type, media_id, caption))
-        received += 1
-    conn.commit()
-    conn.close()
-    return {"status":"ok","received":received}
+    try:
+        for msg in results:
+            parsed = parse_infobip_message(msg)
+            if not parsed:
+                continue
+            text, msg_type, media_id, caption, sender, name = parsed
+            # Upsert contact
+            c.execute("""
+                INSERT INTO contacts (phone, name)
+                VALUES (%s, %s)
+                ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
+            """, (sender, name))
+            # Insert message
+            c.execute("""
+                INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (sender, text, "inbound", datetime.utcnow(), msg_type, media_id, caption))
+            received += 1
+        conn.commit()
+        return {"status":"ok","received":received}
+    finally:
+        conn.close()
 
-# -----------------------------
-# Media proxy
-# -----------------------------
+# media proxy
 @app.get("/media-proxy/{media_identifier}")
 def media_proxy(media_identifier: str):
+    if not AUTH_HEADER or not SENDER_NUMBER:
+        raise HTTPException(status_code=500, detail="Media proxy misconfigured")
+
     media_id = urllib.parse.unquote_plus(media_identifier)
     url = f"{MEDIA_BASE_URL}/whatsapp/1/senders/{SENDER_NUMBER}/media/{media_id}"
     headers = {"Authorization": AUTH_HEADER, "Accept": "*/*"}
@@ -155,8 +169,8 @@ def media_proxy(media_identifier: str):
 
     return StreamingResponse(iter_stream(), media_type=content_type)
 
-# -----------------------------
-# Run server
-# -----------------------------
-if __name__=="__main__":
+# NOTE: For Render start command use:
+# uvicorn webhook:app --host 0.0.0.0 --port $PORT
+if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
