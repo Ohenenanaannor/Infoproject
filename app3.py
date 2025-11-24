@@ -12,7 +12,10 @@ from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
 
 load_dotenv()
-import streamlit as st
+
+# -----------------------------
+# Authentication
+# -----------------------------
 try:
     APP_PASSWORD = st.secrets["APP_PASSWORD"]
 except Exception:
@@ -22,12 +25,10 @@ st.set_page_config(page_title="Protected App", layout="centered")
 st.title("🔐 Protected App Login")
 
 password = st.text_input("Enter password:", type="password")
-
 if password != APP_PASSWORD:
     st.stop()
 
 st.success("🎉 Authenticated! Loading dashboard...")
-
 
 # -----------------------------
 # Config - prefer Streamlit secrets, fallback to env
@@ -68,49 +69,75 @@ def ping_url(url):
 
 def pinger_loop():
     fastapi_health = f"{FASTAPI_PROXY_BASE}/health"
-    streamlit_url = STREAMLIT_PUBLIC_URL.rstrip("/")  # root URL
+    streamlit_url = STREAMLIT_PUBLIC_URL.rstrip("/")
     while True:
-        # ping backend health
         ping_url(fastapi_health)
-        # ping streamlit itself to keep it awake
         ping_url(streamlit_url)
-        # sleep 5 minutes
         time.sleep(300)
 
-# start background thread (daemon so it won't block shutdown)
 thread = threading.Thread(target=pinger_loop, daemon=True)
 thread.start()
 
 # -----------------------------
-# DB initialization (cached)
+# Database connection and helpers
 # -----------------------------
 @st.cache_resource
-def init_db():
+def get_db_connection():
     conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id SERIAL PRIMARY KEY,
-        phone TEXT,
-        message TEXT,
-        direction TEXT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        message_type TEXT,
-        media_link TEXT,
-        caption TEXT
-    )
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS contacts (
-        id SERIAL PRIMARY KEY,
-        phone TEXT UNIQUE,
-        name TEXT
-    )
-    """)
-    conn.commit()
-    return conn, cur
+    with conn.cursor() as cur:
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            phone TEXT,
+            message TEXT,
+            direction TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            message_type TEXT,
+            media_link TEXT,
+            caption TEXT
+        )
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id SERIAL PRIMARY KEY,
+            phone TEXT UNIQUE,
+            name TEXT
+        )
+        """)
+        conn.commit()
+    return conn
 
-conn, cursor = init_db()
+conn = get_db_connection()
+
+def fetch_messages(conn, phone: str = "All"):
+    with conn.cursor() as cursor:
+        if phone == "All":
+            cursor.execute("SELECT * FROM messages ORDER BY timestamp ASC")
+        else:
+            cursor.execute("SELECT * FROM messages WHERE phone=%s ORDER BY timestamp ASC", (phone,))
+        return cursor.fetchall()
+
+def fetch_contacts(conn):
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT phone, name FROM contacts")
+        return {phone: name for phone, name in cursor.fetchall()}
+
+def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption=""):
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption))
+    conn.commit()
+
+def upsert_contact(conn, phone, name):
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO contacts (phone, name)
+            VALUES (%s, %s)
+            ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
+        """, (phone, name))
+    conn.commit()
 
 # -----------------------------
 # Streamlit UI
@@ -118,16 +145,12 @@ conn, cursor = init_db()
 st.set_page_config(page_title="WhatsApp Chat Dashboard", page_icon="💬", layout="centered")
 st.title("💬 WhatsApp Chat Dashboard (Live)")
 
-# auto refresh
 st_autorefresh(interval=15000, key="messages_refresh")
 if st.button("🔄 Refresh Now"):
     st.rerun()
 
-# load messages
-cursor.execute("SELECT * FROM messages ORDER BY timestamp ASC")
-messages = cursor.fetchall()
-cursor.execute("SELECT phone, name FROM contacts")
-contacts = {phone: name for phone, name in cursor.fetchall()}
+messages = fetch_messages(conn)
+contacts = fetch_contacts(conn)
 
 conversation_keys = sorted({m[1] for m in messages})
 contact_display_names = ["All"] + [f"{contacts.get(p,p)} ({p})" for p in conversation_keys]
@@ -138,9 +161,11 @@ st.sidebar.write("---")
 st.sidebar.write("Total contacts:", len(conversation_keys))
 
 selected_phone = "All" if selected_display == "All" else selected_display.split("(")[-1].replace(")", "")
-chat_messages = [m for m in messages if selected_phone == "All" or m[1] == selected_phone]
+chat_messages = fetch_messages(conn, selected_phone)
 
-# helpers
+# -----------------------------
+# Helpers for rendering
+# -----------------------------
 def build_proxy_url(media_identifier: str, direction: str="inbound") -> str:
     if not media_identifier:
         return ""
@@ -183,7 +208,6 @@ def render_bubble(msg_row):
     </div>
     """, unsafe_allow_html=True)
 
-# header & render
 st.subheader("💬 All Conversations" if selected_phone == "All" else f"💬 Chat with: {contacts.get(selected_phone, selected_phone)} ({selected_phone})")
 if not chat_messages:
     st.info("No messages yet for this contact.")
@@ -191,7 +215,9 @@ else:
     for m in chat_messages:
         render_bubble(m)
 
-# send new message
+# -----------------------------
+# Send new message
+# -----------------------------
 st.subheader("Send a New WhatsApp Message")
 recipient = st.text_input("Recipient number (include country code)")
 message_text = st.text_area("Message (text only)")
@@ -222,14 +248,10 @@ if st.button("Send"):
             caption = ""
 
         # Save locally
-        cursor.execute("""
-            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (recipient, message_body, "outbound", datetime.utcnow(), msg_type, media_link, caption))
-        conn.commit()
+        insert_message(conn, recipient, message_body, "outbound", msg_type, media_link, caption)
         st.success("✅ Message saved locally!")
 
-        # send via API
+        # Send via API
         if API_ENABLED:
             headers = {
                 "Authorization": f"App {API_KEY}",

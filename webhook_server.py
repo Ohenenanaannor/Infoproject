@@ -24,43 +24,66 @@ if not DATABASE_URL:
     logging.error("DATABASE_URL not set. Exiting.")
     raise RuntimeError("DATABASE_URL is required")
 
-# simple DB helper (no pool here to keep code small; Render + Neon handle connections)
+# -----------------------------
+# Database helpers
+# -----------------------------
 def get_pg_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def ensure_db():
     conn = get_pg_connection()
-    c = conn.cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS contacts (
-        id SERIAL PRIMARY KEY,
-        phone TEXT UNIQUE,
-        name TEXT
-    )
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS messages (
-        id SERIAL PRIMARY KEY,
-        phone TEXT,
-        message TEXT,
-        direction TEXT,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        message_type TEXT,
-        media_link TEXT,
-        caption TEXT
-    )
-    """)
-    conn.commit()
+    with conn.cursor() as c:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id SERIAL PRIMARY KEY,
+            phone TEXT UNIQUE,
+            name TEXT
+        )
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            phone TEXT,
+            message TEXT,
+            direction TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            message_type TEXT,
+            media_link TEXT,
+            caption TEXT
+        )
+        """)
+        conn.commit()
     conn.close()
+
+def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption=""):
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption))
+    conn.commit()
+
+def upsert_contact(conn, phone, name):
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO contacts (phone, name)
+            VALUES (%s, %s)
+            ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
+        """, (phone, name))
+    conn.commit()
 
 ensure_db()
 
-# health endpoint used by Streamlit pinger
+# -----------------------------
+# Health endpoint
+# -----------------------------
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# helpers
+# -----------------------------
+# Helpers for parsing messages
+# -----------------------------
 def extract_media_id_from_url(url: str) -> str:
     try:
         parsed = urllib.parse.urlparse(url)
@@ -101,7 +124,9 @@ def parse_infobip_message(msg):
 
     return text, msg_type, media_identifier, caption, sender, contact_name
 
-# inbound webhook
+# -----------------------------
+# Inbound webhook
+# -----------------------------
 @app.post("/whatsapp/inbound")
 async def inbound(request: Request):
     try:
@@ -114,7 +139,6 @@ async def inbound(request: Request):
         return JSONResponse({"status":"ok","received":0})
 
     conn = get_pg_connection()
-    c = conn.cursor()
     received = 0
     try:
         for msg in results:
@@ -122,24 +146,16 @@ async def inbound(request: Request):
             if not parsed:
                 continue
             text, msg_type, media_id, caption, sender, name = parsed
-            # Upsert contact
-            c.execute("""
-                INSERT INTO contacts (phone, name)
-                VALUES (%s, %s)
-                ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
-            """, (sender, name))
-            # Insert message
-            c.execute("""
-                INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """, (sender, text, "inbound", datetime.utcnow(), msg_type, media_id, caption))
+            upsert_contact(conn, sender, name)
+            insert_message(conn, sender, text, "inbound", msg_type, media_id, caption)
             received += 1
-        conn.commit()
         return {"status":"ok","received":received}
     finally:
         conn.close()
 
-# media proxy
+# -----------------------------
+# Media proxy endpoint
+# -----------------------------
 @app.get("/media-proxy/{media_identifier}")
 def media_proxy(media_identifier: str):
     if not AUTH_HEADER or not SENDER_NUMBER:
@@ -169,8 +185,9 @@ def media_proxy(media_identifier: str):
 
     return StreamingResponse(iter_stream(), media_type=content_type)
 
-# NOTE: For Render start command use:
-# uvicorn webhook:app --host 0.0.0.0 --port $PORT
+# -----------------------------
+# Run server locally (for dev)
+# -----------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
