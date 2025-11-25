@@ -31,7 +31,7 @@ if password != APP_PASSWORD:
 st.success("🎉 Authenticated! Loading dashboard...")
 
 # -----------------------------
-# Config - prefer Streamlit secrets, fallback to env
+# Config
 # -----------------------------
 try:
     API_KEY = st.secrets["API_KEY"]
@@ -59,7 +59,7 @@ except Exception:
 API_ENABLED = True
 
 # -----------------------------
-# Keep FastAPI and Streamlit warm (background pinger)
+# Keep FastAPI and Streamlit warm
 # -----------------------------
 def ping_url(url):
     try:
@@ -79,7 +79,7 @@ thread = threading.Thread(target=pinger_loop, daemon=True)
 thread.start()
 
 # -----------------------------
-# Database connection and helpers
+# Database connection + Fix
 # -----------------------------
 @st.cache_resource
 def get_db_connection():
@@ -107,9 +107,19 @@ def get_db_connection():
         conn.commit()
     return conn
 
+# NEW: Fix for "connection already closed"
+def ensure_connection(conn):
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1;")
+        return conn
+    except Exception:
+        return get_db_connection()
+
 conn = get_db_connection()
 
 def fetch_messages(conn, phone: str = "All"):
+    conn = ensure_connection(conn)
     with conn.cursor() as cursor:
         if phone == "All":
             cursor.execute("SELECT * FROM messages ORDER BY timestamp ASC")
@@ -118,11 +128,13 @@ def fetch_messages(conn, phone: str = "All"):
         return cursor.fetchall()
 
 def fetch_contacts(conn):
+    conn = ensure_connection(conn)
     with conn.cursor() as cursor:
         cursor.execute("SELECT phone, name FROM contacts")
         return {phone: name for phone, name in cursor.fetchall()}
 
 def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption=""):
+    conn = ensure_connection(conn)
     with conn.cursor() as cursor:
         cursor.execute("""
             INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
@@ -131,6 +143,7 @@ def insert_message(conn, phone, message_text, direction, msg_type, media_link=""
     conn.commit()
 
 def upsert_contact(conn, phone, name):
+    conn = ensure_connection(conn)
     with conn.cursor() as cursor:
         cursor.execute("""
             INSERT INTO contacts (phone, name)
@@ -149,6 +162,8 @@ st_autorefresh(interval=15000, key="messages_refresh")
 if st.button("🔄 Refresh Now"):
     st.rerun()
 
+# FIX APPLIED HERE
+conn = ensure_connection(conn)
 messages = fetch_messages(conn)
 contacts = fetch_contacts(conn)
 
@@ -161,10 +176,13 @@ st.sidebar.write("---")
 st.sidebar.write("Total contacts:", len(conversation_keys))
 
 selected_phone = "All" if selected_display == "All" else selected_display.split("(")[-1].replace(")", "")
+
+# FIX APPLIED HERE
+conn = ensure_connection(conn)
 chat_messages = fetch_messages(conn, selected_phone)
 
 # -----------------------------
-# Helpers for rendering
+# Helpers
 # -----------------------------
 def build_proxy_url(media_identifier: str, direction: str="inbound") -> str:
     if not media_identifier:
@@ -209,6 +227,7 @@ def render_bubble(msg_row):
     """, unsafe_allow_html=True)
 
 st.subheader("💬 All Conversations" if selected_phone == "All" else f"💬 Chat with: {contacts.get(selected_phone, selected_phone)} ({selected_phone})")
+
 if not chat_messages:
     st.info("No messages yet for this contact.")
 else:
@@ -226,6 +245,10 @@ media_caption = st.text_input("Caption (optional)")
 
 if st.button("Send"):
     if recipient.strip() and (message_text.strip() or media_url.strip()):
+
+        # FIX before inserting
+        conn = ensure_connection(conn)
+
         if media_url.strip():
             url_lower = media_url.lower()
             if url_lower.endswith((".jpg", ".jpeg", ".png", ".gif")):
@@ -237,6 +260,7 @@ if st.button("Send"):
             else:
                 msg_type = "document"
                 api_url = DOCUMENT_API_URL
+
             media_link = media_url.strip()
             message_body = ""
             caption = media_caption.strip()
@@ -251,7 +275,7 @@ if st.button("Send"):
         insert_message(conn, recipient, message_body, "outbound", msg_type, media_link, caption)
         st.success("✅ Message saved locally!")
 
-        # Send via API
+        # Send API message
         if API_ENABLED:
             headers = {
                 "Authorization": f"App {API_KEY}",
@@ -276,5 +300,6 @@ if st.button("Send"):
                     st.error(f"❌ API failed: {response.status_code} {response.text}")
             except Exception as e:
                 st.error(f"⚠️ Connection error: {e}")
+
     else:
         st.warning("Please fill recipient and message or media URL.")
