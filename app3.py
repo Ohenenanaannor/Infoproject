@@ -29,7 +29,7 @@ except Exception:
     APP_PASSWORD = os.getenv("APP_PASSWORD")
 
 st.set_page_config(page_title="Protected App", layout="centered")
-st.title("🔐 Protected App Login")
+st.title("🔐 WhatsApp Conversation")
 
 # username + password secrets (optional)
 try:
