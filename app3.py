@@ -11,6 +11,13 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
 
+
+# button that resets the app & reconnects to PostgreSQL.
+if st.sidebar.button("♻️ Reset App / Reconnect DB"):
+    st.cache_resource.clear()
+    st.session_state.clear()
+    st.rerun()
+
 load_dotenv()
 
 # -----------------------------
@@ -160,12 +167,6 @@ st.title("💬 WhatsApp Chat Dashboard (Live)")
 
 st_autorefresh(interval=15000, key="messages_refresh")
 if st.button("🔄 Refresh Now"):
-    st.rerun()
-
-# button that resets the app & reconnects to PostgreSQL.
-if st.sidebar.button("♻️ Reset App / Reconnect DB"):
-    st.cache_resource.clear()
-    st.session_state.clear()
     st.rerun()
 
 # FIX APPLIED HERE
