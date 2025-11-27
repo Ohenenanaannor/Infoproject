@@ -31,11 +31,33 @@ except Exception:
 st.set_page_config(page_title="Protected App", layout="centered")
 st.title("🔐 Protected App Login")
 
-password = st.text_input("Enter password:", type="password")
-if password != APP_PASSWORD:
+# username + password secrets (optional)
+try:
+    APP_USERNAME = st.secrets["APP_USERNAME"]
+except Exception:
+    APP_USERNAME = os.getenv("APP_USERNAME", "admin")  # fallback username
+
+# If not logged in, show login form
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        login_btn = st.form_submit_button("🔓 Login")
+
+    if login_btn:
+        if username == APP_USERNAME and password == APP_PASSWORD:
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("❌ Incorrect username or password")
     st.stop()
 
-st.success("🎉 Authenticated! Loading dashboard...")
+# If authenticated:
+st.success("🎉 Authenticated! Loading dashboard…")
+
 
 # -----------------------------
 # Config
