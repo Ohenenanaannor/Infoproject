@@ -282,7 +282,7 @@ def render_bubble(msg_row):
     bg           = "#ffffff" if is_inbound else "#dcf8c6"
 
     content_html = "<i>No content</i>"
-    if msg_type == "text" or not msg_type:
+    if msg_type in ("text", "contact") or not msg_type:
         content_html = message_text or "<i>No text content</i>"
     elif msg_type in ("image", "video", "document", "voice", "audio"):
         if media_link:
