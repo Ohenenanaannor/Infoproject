@@ -1,4 +1,5 @@
 # webhook.py
+import json
 import os
 import logging
 import urllib.parse
@@ -106,21 +107,57 @@ def parse_infobip_message(msg):
 
     if msg_type_raw == "TEXT":
         t = content.get("text", "")
-        text = t.get("body","") if isinstance(t, dict) else str(t or "")
+        text = t.get("body", "") if isinstance(t, dict) else str(t or "")
         msg_type = "text"
-    elif msg_type_raw in ("IMAGE","VIDEO","DOCUMENT","VOICE","AUDIO"):
+
+    elif msg_type_raw in ("IMAGE", "VIDEO", "DOCUMENT", "VOICE", "AUDIO"):
         msg_type = msg_type_raw.lower()
-        caption = content.get("caption","") or ""
+        caption = content.get("caption", "") or ""
         media_id = content.get("mediaId") or content.get("id")
         media_url = content.get("url") or content.get("mediaUrl")
         if media_id:
             media_identifier = str(media_id)
         elif media_url:
             media_identifier = extract_media_id_from_url(media_url)
+
+    elif msg_type_raw in ("CONTACT", "CONTACTS"):
+        msg_type = "contact"
+        contacts_list = content.get("contacts") or content.get("contact") or []
+        if isinstance(contacts_list, dict):
+            contacts_list = [contacts_list]
+
+        parts = []
+        for c in contacts_list:
+            name_obj = c.get("name", {})
+            display_name = (
+                name_obj.get("formattedName")
+                or name_obj.get("formatted_name")
+                or name_obj.get("firstName")
+                or "Unknown"
+            ) if isinstance(name_obj, dict) else str(name_obj)
+
+            phones = c.get("phones") or c.get("phoneNumbers") or []
+            phone_numbers = [
+                p.get("phone") or p.get("number") or str(p)
+                for p in phones
+            ] if phones else []
+
+            phone_str = ", ".join(phone_numbers) if phone_numbers else "no number"
+            parts.append(f"{display_name} ({phone_str})")
+
+        text = "📇 Shared contact: " + "; ".join(parts) if parts else "📇 Shared a contact card"
+
+        # Safety net: log the raw payload so we can confirm the real field names
+        logging.info("RAW CONTACT PAYLOAD: %s", json.dumps(msg, default=str))
+
     else:
+        # Catch-all for any other/unhandled type (location, sticker, button reply, etc.)
+        msg_type = msg_type_raw.lower()
         t = content.get("text", "")
-        text = t.get("body","") if isinstance(t, dict) else str(t or "")
-        msg_type = "text"
+        text = t.get("body", "") if isinstance(t, dict) else str(t or "")
+        if not text:
+            text = f"[Unsupported message type: {msg_type_raw}]"
+            logging.info("RAW UNHANDLED PAYLOAD (%s): %s", msg_type_raw, json.dumps(msg, default=str))
 
     return text, msg_type, media_identifier, caption, sender, contact_name
 
@@ -136,7 +173,7 @@ async def inbound(request: Request):
 
     results = payload.get("results", []) or payload.get("messages", [])
     if not results:
-        return JSONResponse({"status":"ok","received":0})
+        return JSONResponse({"status": "ok", "received": 0})
 
     conn = get_pg_connection()
     received = 0
@@ -149,7 +186,7 @@ async def inbound(request: Request):
             upsert_contact(conn, sender, name)
             insert_message(conn, sender, text, "inbound", msg_type, media_id, caption)
             received += 1
-        return {"status":"ok","received":received}
+        return {"status": "ok", "received": received}
     finally:
         conn.close()
 
@@ -173,7 +210,7 @@ def media_proxy(media_identifier: str):
     if resp.status_code != 200:
         raise HTTPException(status_code=resp.status_code, detail=f"Infobip error: {resp.status_code} {resp.text[:500]}")
 
-    content_type = resp.headers.get("Content-Type","application/octet-stream")
+    content_type = resp.headers.get("Content-Type", "application/octet-stream")
 
     def iter_stream():
         try:
