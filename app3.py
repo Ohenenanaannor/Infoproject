@@ -6,6 +6,7 @@ import urllib.parse
 import uuid
 from datetime import datetime
 import streamlit as st
+import streamlit.components.v1 as components
 import requests
 from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
@@ -331,6 +332,22 @@ if not chat_messages:
 else:
     for m in chat_messages:
         render_bubble(m)
+
+# -----------------------------
+# ✅ Auto-scroll to the latest message
+# -----------------------------
+components.html(
+    """
+    <script>
+        var mainDoc = window.parent.document;
+        var scrollContainer = mainDoc.querySelector('section.main');
+        if (scrollContainer) {
+            scrollContainer.scrollTop = scrollContainer.scrollHeight;
+        }
+    </script>
+    """,
+    height=0,
+)
 
 # -----------------------------
 # Send new message
