@@ -149,8 +149,6 @@ conn = get_db_connection()
 
 # -----------------------------
 # ✅ FIX 1 — Lightweight sidebar query
-# Fetches only distinct phone numbers — NOT all message content.
-# This was the single biggest source of unnecessary data transfer.
 # -----------------------------
 def fetch_distinct_phones(conn):
     conn = ensure_connection(conn)
@@ -160,8 +158,6 @@ def fetch_distinct_phones(conn):
 
 # -----------------------------
 # ✅ FIX 2 — Contacts cached for 5 minutes
-# Contacts rarely change, no need to re-fetch every 60 seconds.
-# _conn is prefixed with _ so Streamlit doesn't try to hash it.
 # -----------------------------
 @st.cache_data(ttl=300)
 def fetch_contacts_cached(_conn):
@@ -172,14 +168,11 @@ def fetch_contacts_cached(_conn):
 
 # -----------------------------
 # ✅ FIX 3 — Message fetch scoped to selected conversation only
-# We no longer fetch ALL messages on every refresh.
-# Only the selected contact's messages are pulled each cycle.
 # -----------------------------
 def fetch_messages(conn, phone: str):
     conn = ensure_connection(conn)
     with conn.cursor() as cur:
         if phone == "All":
-            # "All" view: fetch only recent 200 messages to cap payload
             cur.execute(
                 "SELECT * FROM messages ORDER BY timestamp DESC LIMIT 200"
             )
@@ -213,7 +206,6 @@ def upsert_contact(conn, phone, name):
 
 # -----------------------------
 # ✅ FIX 4 — Message count monitor
-# Lets you see DB growth without running a full SELECT *
 # -----------------------------
 @st.cache_data(ttl=300)
 def fetch_message_count(_conn):
@@ -224,7 +216,6 @@ def fetch_message_count(_conn):
 
 # -----------------------------
 # ✅ FIX 5 — Autorefresh slowed from 15s → 60s
-# 4× fewer DB round-trips per hour at no cost to usability.
 # -----------------------------
 st_autorefresh(interval=60000, key="messages_refresh")
 
@@ -233,10 +224,7 @@ st_autorefresh(interval=60000, key="messages_refresh")
 # -----------------------------
 conn = ensure_connection(conn)
 
-# Cheap: only phone numbers
 conversation_keys = fetch_distinct_phones(conn)
-
-# Cheap: cached for 5 min
 contacts = fetch_contacts_cached(conn)
 
 contact_display_names = ["All"] + [
@@ -248,7 +236,6 @@ selected_display = st.sidebar.selectbox("Select a conversation", contact_display
 st.sidebar.write("---")
 st.sidebar.write("Total contacts:", len(conversation_keys))
 
-# DB size monitor — cached, so costs nothing extra mid-cycle
 msg_count = fetch_message_count(conn)
 st.sidebar.caption(f"📊 Total messages in DB: {msg_count:,}")
 
@@ -261,7 +248,6 @@ selected_phone = (
     else selected_display.split("(")[-1].replace(")", "")
 )
 
-# Only fetch messages for the selected conversation
 chat_messages = fetch_messages(conn, selected_phone)
 
 # -----------------------------
@@ -336,14 +322,17 @@ else:
 # -----------------------------
 # ✅ Auto-scroll to the latest message
 # -----------------------------
+st.markdown('<div id="bottom-anchor"></div>', unsafe_allow_html=True)
+
 components.html(
     """
     <script>
-        var mainDoc = window.parent.document;
-        var scrollContainer = mainDoc.querySelector('section.main');
-        if (scrollContainer) {
-            scrollContainer.scrollTop = scrollContainer.scrollHeight;
-        }
+        setTimeout(function() {
+            var anchor = window.parent.document.getElementById('bottom-anchor');
+            if (anchor) {
+                anchor.scrollIntoView({behavior: "instant", block: "end"});
+            }
+        }, 300);
     </script>
     """,
     height=0,
@@ -385,7 +374,6 @@ if st.button("Send"):
             caption      = ""
 
         insert_message(conn, recipient, message_body, "outbound", msg_type, media_link, caption)
-        # Invalidate the contacts cache so new recipients appear immediately
         st.cache_data.clear()
         st.success("✅ Message saved locally!")
 
