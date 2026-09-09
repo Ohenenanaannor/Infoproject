@@ -4,7 +4,8 @@ import threading
 import time
 import urllib.parse
 import uuid
-from datetime import datetime
+import hashlib
+from datetime import datetime, date
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
@@ -88,7 +89,6 @@ API_ENABLED = True
 
 # -----------------------------
 # Keep FastAPI and Streamlit warm
-# Pings every 5 min — does NOT touch Neon DB
 # -----------------------------
 def ping_url(url):
     try:
@@ -136,7 +136,6 @@ def get_db_connection():
     return conn
 
 def ensure_connection(conn):
-    """Reconnect only if the connection is genuinely broken."""
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
@@ -148,7 +147,7 @@ def ensure_connection(conn):
 conn = get_db_connection()
 
 # -----------------------------
-# ✅ FIX 1 — Lightweight sidebar query
+# Query helpers
 # -----------------------------
 def fetch_distinct_phones(conn):
     conn = ensure_connection(conn)
@@ -156,9 +155,6 @@ def fetch_distinct_phones(conn):
         cur.execute("SELECT DISTINCT phone FROM messages ORDER BY phone")
         return [row[0] for row in cur.fetchall()]
 
-# -----------------------------
-# ✅ FIX 2 — Contacts cached for 5 minutes
-# -----------------------------
 @st.cache_data(ttl=300)
 def fetch_contacts_cached(_conn):
     _conn = ensure_connection(_conn)
@@ -166,9 +162,6 @@ def fetch_contacts_cached(_conn):
         cur.execute("SELECT phone, name FROM contacts")
         return {phone: name for phone, name in cur.fetchall()}
 
-# -----------------------------
-# ✅ FIX 3 — Message fetch scoped to selected conversation only
-# -----------------------------
 def fetch_messages(conn, phone: str):
     conn = ensure_connection(conn)
     with conn.cursor() as cur:
@@ -204,9 +197,6 @@ def upsert_contact(conn, phone, name):
         """, (phone, name))
     conn.commit()
 
-# -----------------------------
-# ✅ FIX 4 — Message count monitor
-# -----------------------------
 @st.cache_data(ttl=300)
 def fetch_message_count(_conn):
     _conn = ensure_connection(_conn)
@@ -214,9 +204,6 @@ def fetch_message_count(_conn):
         cur.execute("SELECT COUNT(*) FROM messages")
         return cur.fetchone()[0]
 
-# -----------------------------
-# ✅ FIX 5 — Autorefresh slowed from 15s → 60s
-# -----------------------------
 st_autorefresh(interval=60000, key="messages_refresh")
 
 # -----------------------------
@@ -251,7 +238,62 @@ selected_phone = (
 chat_messages = fetch_messages(conn, selected_phone)
 
 # -----------------------------
-# Helpers
+# Avatar helpers
+# -----------------------------
+AVATAR_COLORS = [
+    "#25D366", "#128C7E", "#075E54", "#34B7F1",
+    "#FF6B6B", "#F7B733", "#A66DD4", "#EE5A6F",
+    "#4ECDC4", "#5C7AEA",
+]
+
+def get_initials(name: str) -> str:
+    name = (name or "?").strip()
+    parts = [p for p in name.split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+def get_avatar_color(key: str) -> str:
+    h = int(hashlib.md5((key or "?").encode()).hexdigest(), 16)
+    return AVATAR_COLORS[h % len(AVATAR_COLORS)]
+
+def render_avatar(name: str, key: str) -> str:
+    initials = get_initials(name)
+    color = get_avatar_color(key)
+    return (
+        f"<div style='width:36px; height:36px; border-radius:50%; background:{color}; "
+        f"color:white; display:flex; align-items:center; justify-content:center; "
+        f"font-size:13px; font-weight:600; flex-shrink:0;'>{initials}</div>"
+    )
+
+# -----------------------------
+# Timestamp helpers
+# -----------------------------
+def format_time_only(ts) -> str:
+    try:
+        t = ts.strftime("%I:%M %p").lstrip("0")
+        return t
+    except Exception:
+        return str(ts)
+
+def format_date_label(ts) -> str:
+    try:
+        msg_date = ts.date() if hasattr(ts, "date") else ts
+        today = date.today()
+        diff = (today - msg_date).days
+        if diff == 0:
+            return "Today"
+        elif diff == 1:
+            return "Yesterday"
+        else:
+            return msg_date.strftime("%B %d, %Y")
+    except Exception:
+        return str(ts)
+
+# -----------------------------
+# Media proxy helper
 # -----------------------------
 def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
     if not media_identifier:
@@ -261,12 +303,16 @@ def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
     encoded = urllib.parse.quote_plus(media_identifier)
     return f"{FASTAPI_PROXY_BASE}/media-proxy/{encoded}"
 
-def render_bubble(msg_row):
+# -----------------------------
+# Bubble rendering (with grouping, avatars, ticks)
+# -----------------------------
+def render_bubble(msg_row, show_header: bool):
     _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
-    display_name = f"{contacts.get(phone, phone)} ({phone})"
+    display_name = contacts.get(phone, phone)
     is_inbound   = direction == "inbound"
     align        = "flex-start" if is_inbound else "flex-end"
     bg           = "#ffffff" if is_inbound else "#dcf8c6"
+    time_str     = format_time_only(timestamp)
 
     content_html = "<i>No content</i>"
     if msg_type in ("text", "contact") or not msg_type:
@@ -292,13 +338,29 @@ def render_bubble(msg_row):
             if caption:
                 content_html += f"<div style='margin-top:6px'>{caption}</div>"
 
-    st.markdown(f"""
-    <div style='display:flex; justify-content:{align}; margin:8px 0;'>
-      <div style='max-width:72%; background:{bg}; padding:10px; border-radius:10px; border:1px solid #ddd;'>
-        <b>{display_name}</b><br><br>
+    # Delivery ticks only make sense for outbound (messages you sent)
+    ticks_html = " <span style='color:#34B7F1;'>&#10003;&#10003;</span>" if not is_inbound else ""
+
+    avatar_html = render_avatar(display_name, phone) if (show_header and is_inbound) else "<div style='width:36px; flex-shrink:0;'></div>"
+    header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
+
+    bubble = f"""
+    <div style='display:flex; justify-content:{align}; margin:4px 0; align-items:flex-end; gap:8px;'>
+      {avatar_html if is_inbound else ""}
+      <div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; border:1px solid #ddd;'>
+        {header_html}
         {content_html}
-        <div style='text-align:right; font-size:11px; color:#666; margin-top:6px;'>{timestamp}</div>
+        <div style='text-align:right; font-size:11px; color:#666; margin-top:4px;'>{time_str}{ticks_html}</div>
       </div>
+      {avatar_html if not is_inbound else ""}
+    </div>
+    """
+    st.markdown(bubble, unsafe_allow_html=True)
+
+def render_date_divider(label: str):
+    st.markdown(f"""
+    <div style='text-align:center; margin:14px 0;'>
+      <span style='background:#e9edef; color:#54656f; font-size:12px; padding:4px 12px; border-radius:8px;'>{label}</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -316,8 +378,21 @@ else:
 if not chat_messages:
     st.info("No messages yet for this contact.")
 else:
+    prev_phone = None
+    prev_date = None
     for m in chat_messages:
-        render_bubble(m)
+        _, phone, message_text, direction, timestamp, msg_type, media_link, caption = m
+
+        # Date divider whenever the day changes
+        msg_date = timestamp.date() if hasattr(timestamp, "date") else timestamp
+        if msg_date != prev_date:
+            render_date_divider(format_date_label(timestamp))
+            prev_date = msg_date
+            prev_phone = None  # force header to show again after a date divider
+
+        show_header = (phone != prev_phone)
+        render_bubble(m, show_header)
+        prev_phone = phone
 
 # -----------------------------
 # ✅ Auto-scroll to the latest message
