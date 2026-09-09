@@ -305,6 +305,8 @@ def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
 
 # -----------------------------
 # Bubble rendering (with grouping, avatars, ticks)
+# NOTE: built as single-line f-strings, no leading indentation,
+# so Streamlit's markdown parser doesn't mistake it for a code block.
 # -----------------------------
 def render_bubble(msg_row, show_header: bool):
     _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
@@ -321,16 +323,9 @@ def render_bubble(msg_row, show_header: bool):
         if media_link:
             proxy = build_proxy_url(media_link, direction)
             if msg_type == "image":
-                content_html = (
-                    f"<a href='{proxy}' target='_blank'>"
-                    f"<img src='{proxy}' style='max-width:220px; border-radius:8px; border:1px solid #ddd;'>"
-                    f"</a>"
-                )
+                content_html = f"<a href='{proxy}' target='_blank'><img src='{proxy}' style='max-width:220px; border-radius:8px; border:1px solid #ddd;'></a>"
             elif msg_type == "video":
-                content_html = (
-                    f"<a href='{proxy}' target='_blank'>View Video</a><br>"
-                    f"<video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
-                )
+                content_html = f"<a href='{proxy}' target='_blank'>View Video</a><br><video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
             elif msg_type in ("voice", "audio"):
                 content_html = f"<audio controls><source src='{proxy}' type='audio/mpeg'></audio>"
             elif msg_type == "document":
@@ -338,31 +333,33 @@ def render_bubble(msg_row, show_header: bool):
             if caption:
                 content_html += f"<div style='margin-top:6px'>{caption}</div>"
 
-    # Delivery ticks only make sense for outbound (messages you sent)
     ticks_html = " <span style='color:#34B7F1;'>&#10003;&#10003;</span>" if not is_inbound else ""
-
     avatar_html = render_avatar(display_name, phone) if (show_header and is_inbound) else "<div style='width:36px; flex-shrink:0;'></div>"
     header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
 
-    bubble = f"""
-    <div style='display:flex; justify-content:{align}; margin:4px 0; align-items:flex-end; gap:8px;'>
-      {avatar_html if is_inbound else ""}
-      <div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; border:1px solid #ddd;'>
-        {header_html}
-        {content_html}
-        <div style='text-align:right; font-size:11px; color:#666; margin-top:4px;'>{time_str}{ticks_html}</div>
-      </div>
-      {avatar_html if not is_inbound else ""}
-    </div>
-    """
+    left_avatar = avatar_html if is_inbound else ""
+    right_avatar = avatar_html if not is_inbound else ""
+
+    bubble = (
+        f"<div style='display:flex; justify-content:{align}; margin:4px 0; align-items:flex-end; gap:8px;'>"
+        f"{left_avatar}"
+        f"<div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; border:1px solid #ddd;'>"
+        f"{header_html}"
+        f"{content_html}"
+        f"<div style='text-align:right; font-size:11px; color:#666; margin-top:4px;'>{time_str}{ticks_html}</div>"
+        f"</div>"
+        f"{right_avatar}"
+        f"</div>"
+    )
     st.markdown(bubble, unsafe_allow_html=True)
 
 def render_date_divider(label: str):
-    st.markdown(f"""
-    <div style='text-align:center; margin:14px 0;'>
-      <span style='background:#e9edef; color:#54656f; font-size:12px; padding:4px 12px; border-radius:8px;'>{label}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    divider = (
+        f"<div style='text-align:center; margin:14px 0;'>"
+        f"<span style='background:#e9edef; color:#54656f; font-size:12px; padding:4px 12px; border-radius:8px;'>{label}</span>"
+        f"</div>"
+    )
+    st.markdown(divider, unsafe_allow_html=True)
 
 # -----------------------------
 # Chat view
@@ -383,12 +380,11 @@ else:
     for m in chat_messages:
         _, phone, message_text, direction, timestamp, msg_type, media_link, caption = m
 
-        # Date divider whenever the day changes
         msg_date = timestamp.date() if hasattr(timestamp, "date") else timestamp
         if msg_date != prev_date:
             render_date_divider(format_date_label(timestamp))
             prev_date = msg_date
-            prev_phone = None  # force header to show again after a date divider
+            prev_phone = None
 
         show_header = (phone != prev_phone)
         render_bubble(m, show_header)
