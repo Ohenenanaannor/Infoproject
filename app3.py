@@ -500,7 +500,7 @@ components.html(
 )
 
 # -----------------------------
-# ✅ Message composer
+# ✅ Message composer — "+" attach menu, text box, send button
 # -----------------------------
 st.write("")
 
@@ -513,23 +513,35 @@ else:
     recipient = selected_phone
     st.caption(f"Sending to: {contacts.get(selected_phone, selected_phone)} ({selected_phone})")
 
-with st.expander("📎 Attach media (optional)"):
-    media_url = st.text_input(
-        "Image/Video/Document URL (must start with https://)",
-        key="media_url_input",
-    )
-    media_caption = st.text_input("Caption (optional)", key="media_caption_input")
+col_attach, col_form = st.columns([1, 8])
 
-with st.form(key="send_message_form", clear_on_submit=True):
-    col_input, col_send = st.columns([6, 1])
-    with col_input:
-        message_text = st.text_input(
-            "Message",
-            placeholder="Type a message",
-            label_visibility="collapsed",
+with col_attach:
+    with st.popover("➕"):
+        st.markdown("**Attach**")
+        media_url = st.text_input(
+            "📄 Document / 🖼 Photo / 🎬 Video (URL, https://)",
+            key="media_url_input",
         )
-    with col_send:
-        send_clicked = st.form_submit_button("➤")
+        media_caption = st.text_input("Caption (optional)", key="media_caption_input")
+        st.markdown("---")
+        st.caption("📷 Camera — coming soon")
+        st.caption("🎧 Audio — coming soon")
+        st.caption("👤 Contact — coming soon")
+        st.caption("📊 Poll — coming soon")
+        st.caption("📅 Event — coming soon")
+        st.caption("😊 New sticker — coming soon")
+
+with col_form:
+    with st.form(key="send_message_form", clear_on_submit=True):
+        col_input, col_send = st.columns([6, 1])
+        with col_input:
+            message_text = st.text_input(
+                "Message",
+                placeholder="Type a message",
+                label_visibility="collapsed",
+            )
+        with col_send:
+            send_clicked = st.form_submit_button("➤")
 
 if send_clicked:
     recipient_value = (recipient or "").strip()
