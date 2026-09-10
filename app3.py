@@ -54,7 +54,6 @@ def inject_whatsapp_theme():
             color: white;
         }
 
-        /* Sidebar dropdown box */
         [data-testid="stSidebar"] [data-baseweb="select"] > div {
             background-color: #128C7E;
             border-radius: 8px;
@@ -319,12 +318,16 @@ def render_avatar(name: str, key: str) -> str:
     )
 
 # -----------------------------
-# ✅ Sidebar — searchable dropdown (type to filter)
+# ✅ Sidebar — dedicated All button + searchable dropdown
 # -----------------------------
 if "selected_phone" not in st.session_state:
     st.session_state.selected_phone = "All"
 
 st.sidebar.title("📱 Contacts")
+
+if st.sidebar.button("🌍 All conversations", key="all_conversations_btn", use_container_width=True):
+    st.session_state.selected_phone = "All"
+    st.rerun()
 
 contact_options = ["All"] + conversation_keys
 
