@@ -41,7 +41,6 @@ def inject_whatsapp_theme():
             color: #075E54 !important;
         }
 
-        /* Default button styling (main area) — teal pill */
         .stButton > button {
             background-color: #00A884;
             color: white;
@@ -55,34 +54,14 @@ def inject_whatsapp_theme():
             color: white;
         }
 
-        /* Sidebar contact-list buttons — flat rows, not pills */
-        [data-testid="stSidebar"] .stButton > button {
-            background-color: transparent;
-            color: #F0F2F1;
-            border: none;
+        /* Sidebar dropdown box */
+        [data-testid="stSidebar"] [data-baseweb="select"] > div {
+            background-color: #128C7E;
             border-radius: 8px;
-            text-align: left;
-            justify-content: flex-start;
-            padding: 8px 10px;
-            font-weight: 400;
-            width: 100%;
-            display: flex;
-        }
-        [data-testid="stSidebar"] .stButton > button:hover {
-            background-color: rgba(255,255,255,0.08);
-            color: #F0F2F1;
-        }
-        /* Selected contact row (Streamlit "primary" button type) */
-        [data-testid="stSidebar"] .stButton > button[kind="primary"] {
-            background-color: #128C7E;
+            border: none;
             color: white;
-            font-weight: 500;
-        }
-        [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
-            background-color: #128C7E;
         }
 
-        /* Text inputs / text areas — rounded, soft border, green focus */
         div[data-baseweb="input"] > div,
         div[data-baseweb="textarea"] > div {
             border-radius: 20px !important;
@@ -304,7 +283,7 @@ conversation_keys = fetch_distinct_phones(conn)
 contacts = fetch_contacts_cached(conn)
 
 # -----------------------------
-# Avatar helpers (colors for chat bubbles, emoji for sidebar list)
+# Avatar helpers
 # -----------------------------
 AVATAR_COLORS = [
     "#25D366", "#128C7E", "#075E54", "#34B7F1",
@@ -340,36 +319,31 @@ def render_avatar(name: str, key: str) -> str:
     )
 
 # -----------------------------
-# ✅ Sidebar — clickable contact list
+# ✅ Sidebar — searchable dropdown (type to filter)
 # -----------------------------
 if "selected_phone" not in st.session_state:
     st.session_state.selected_phone = "All"
 
 st.sidebar.title("📱 Contacts")
 
-all_selected = st.session_state.selected_phone == "All"
-if st.sidebar.button(
-    "💬  All conversations",
-    key="contact_all",
-    type="primary" if all_selected else "secondary",
-    use_container_width=True,
-):
-    st.session_state.selected_phone = "All"
-    st.rerun()
+contact_options = ["All"] + conversation_keys
 
-for p in conversation_keys:
+def format_contact_option(p):
+    if p == "All":
+        return "💬  All conversations"
     name = contacts.get(p, p)
     emoji = get_avatar_emoji(p)
-    label = f"{emoji}  {name}  ({p})"
-    is_selected = st.session_state.selected_phone == p
-    if st.sidebar.button(
-        label,
-        key=f"contact_btn_{p}",
-        type="primary" if is_selected else "secondary",
-        use_container_width=True,
-    ):
-        st.session_state.selected_phone = p
-        st.rerun()
+    return f"{emoji}  {name}  ({p})"
+
+selected_phone = st.sidebar.selectbox(
+    "Select a conversation",
+    contact_options,
+    format_func=format_contact_option,
+    index=contact_options.index(st.session_state.selected_phone)
+        if st.session_state.selected_phone in contact_options else 0,
+    key="contact_selectbox",
+)
+st.session_state.selected_phone = selected_phone
 
 st.sidebar.write("---")
 st.sidebar.write("Total contacts:", len(conversation_keys))
@@ -381,7 +355,6 @@ if st.sidebar.button("🔄 Refresh Now", key="refresh_now_btn"):
     st.cache_data.clear()
     st.rerun()
 
-selected_phone = st.session_state.selected_phone
 chat_messages = fetch_messages(conn, selected_phone)
 
 # -----------------------------
@@ -420,8 +393,7 @@ def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
     return f"{FASTAPI_PROXY_BASE}/media-proxy/{encoded}"
 
 # -----------------------------
-# Bubble rendering (single-line f-strings, no leading indentation —
-# avoids Streamlit's markdown parser mistaking it for a code block)
+# Bubble rendering
 # -----------------------------
 def render_bubble(msg_row, show_header: bool):
     _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
@@ -525,7 +497,7 @@ components.html(
 )
 
 # -----------------------------
-# ✅ Message composer — pill-style row, tied to the selected contact
+# ✅ Message composer
 # -----------------------------
 st.write("")
 
