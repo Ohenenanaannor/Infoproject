@@ -1,47 +1,211 @@
-# webhook.py
-import json
 import os
-import logging
-import urllib.parse
-import requests
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
-from datetime import datetime
-from dotenv import load_dotenv
 import psycopg2
+import threading
+import time
+import urllib.parse
+import uuid
+import hashlib
+from datetime import datetime, date
+import streamlit as st
+import streamlit.components.v1 as components
+import requests
+from streamlit_autorefresh import st_autorefresh
+from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
-
-app = FastAPI(title="WhatsApp Webhook")
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-API_KEY = os.getenv("API_KEY")
-SENDER_NUMBER = os.getenv("SENDER_NUMBER")
-MEDIA_BASE_URL = "https://api.infobip.com"
-AUTH_HEADER = f"App {API_KEY}" if API_KEY else None
-
-if not DATABASE_URL:
-    logging.error("DATABASE_URL not set. Exiting.")
-    raise RuntimeError("DATABASE_URL is required")
 
 # -----------------------------
-# Database helpers
+# Page config (must be first st call)
 # -----------------------------
-def get_pg_connection():
-    return psycopg2.connect(DATABASE_URL)
+st.set_page_config(page_title="WhatsApp Chat Dashboard", page_icon="💬", layout="centered")
 
-def ensure_db():
-    conn = get_pg_connection()
-    with conn.cursor() as c:
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS contacts (
-            id SERIAL PRIMARY KEY,
-            phone TEXT UNIQUE,
-            name TEXT
-        )
-        """)
-        c.execute("""
+# -----------------------------
+# ✅ WhatsApp-style theme (CSS injection)
+# -----------------------------
+def inject_whatsapp_theme():
+    st.markdown("""
+    <style>
+        [data-testid="stAppViewContainer"] {
+            background-color: #ECE5DD;
+        }
+        [data-testid="stHeader"] {
+            background-color: rgba(0,0,0,0);
+        }
+        [data-testid="stSidebar"] {
+            background-color: #075E54;
+        }
+        [data-testid="stSidebar"] * {
+            color: #F0F2F1 !important;
+        }
+        h1, h2, h3 {
+            color: #075E54 !important;
+        }
+
+        /* Default button styling (main area) — teal pill */
+        .stButton > button {
+            background-color: #00A884;
+            color: white;
+            border-radius: 20px;
+            border: none;
+            padding: 0.5em 1.2em;
+            font-weight: 600;
+        }
+        .stButton > button:hover {
+            background-color: #06997A;
+            color: white;
+        }
+
+        /* Sidebar contact-list buttons — flat rows, not pills */
+        [data-testid="stSidebar"] .stButton > button {
+            background-color: transparent;
+            color: #F0F2F1;
+            border: none;
+            border-radius: 8px;
+            text-align: left;
+            justify-content: flex-start;
+            padding: 8px 10px;
+            font-weight: 400;
+            width: 100%;
+            display: flex;
+        }
+        [data-testid="stSidebar"] .stButton > button:hover {
+            background-color: rgba(255,255,255,0.08);
+            color: #F0F2F1;
+        }
+        /* Selected contact row (Streamlit "primary" button type) */
+        [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+            background-color: #128C7E;
+            color: white;
+            font-weight: 500;
+        }
+        [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+            background-color: #128C7E;
+        }
+
+        /* Text inputs / text areas — rounded, soft border, green focus */
+        div[data-baseweb="input"] > div,
+        div[data-baseweb="textarea"] > div {
+            border-radius: 20px !important;
+            border: 1px solid #D1D7D3 !important;
+            background-color: #FFFFFF !important;
+        }
+        div[data-baseweb="input"] > div:focus-within,
+        div[data-baseweb="textarea"] > div:focus-within {
+            border: 1px solid #00A884 !important;
+            box-shadow: 0 0 0 1px #00A884 !important;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #B7C2BE;
+            border-radius: 10px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+inject_whatsapp_theme()
+
+# -----------------------------
+# Sidebar reset button
+# -----------------------------
+if st.sidebar.button("♻️ Reset App / Reconnect DB", key="reset_app_btn"):
+    st.cache_resource.clear()
+    st.cache_data.clear()
+    st.session_state.clear()
+    st.rerun()
+
+# -----------------------------
+# Authentication
+# -----------------------------
+try:
+    APP_PASSWORD = st.secrets["APP_PASSWORD"]
+    APP_USERNAME = st.secrets.get("APP_USERNAME", "admin")
+except Exception:
+    APP_PASSWORD = os.getenv("APP_PASSWORD")
+    APP_USERNAME = os.getenv("APP_USERNAME", "admin")
+
+st.title("🔐 WhatsApp Conversation")
+
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+
+if not st.session_state.logged_in:
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        login_btn = st.form_submit_button("🔓 Login")
+
+    if login_btn:
+        if username == APP_USERNAME and password == APP_PASSWORD:
+            st.session_state.logged_in = True
+            st.rerun()
+        else:
+            st.error("❌ Incorrect username or password")
+    st.stop()
+
+st.success("🎉 Authenticated! Loading dashboard…")
+
+# -----------------------------
+# Config
+# -----------------------------
+try:
+    API_KEY            = st.secrets["API_KEY"]
+    SANDBOX_NUMBER     = st.secrets["SANDBOX_NUMBER"]
+    TEXT_API_URL       = st.secrets["TEXT_API_URL"]
+    IMAGE_API_URL      = st.secrets["IMAGE_API_URL"]
+    VIDEO_API_URL      = st.secrets["VIDEO_API_URL"]
+    DOCUMENT_API_URL   = st.secrets["DOCUMENT_API_URL"]
+    NGROK_URL          = st.secrets["NGROK_URL"]
+    DATABASE_URL       = st.secrets["DATABASE_URL"]
+    FASTAPI_PROXY_BASE = st.secrets["FASTAPI_PROXY_BASE"].rstrip("/")
+    STREAMLIT_PUBLIC_URL = st.secrets.get("STREAMLIT_URL") or ""
+except Exception:
+    API_KEY            = os.getenv("API_KEY")
+    SANDBOX_NUMBER     = os.getenv("SANDBOX_NUMBER")
+    TEXT_API_URL       = os.getenv("TEXT_API_URL")
+    IMAGE_API_URL      = os.getenv("IMAGE_API_URL")
+    VIDEO_API_URL      = os.getenv("VIDEO_API_URL")
+    DOCUMENT_API_URL   = os.getenv("DOCUMENT_API_URL")
+    NGROK_URL          = os.getenv("NGROK_URL")
+    DATABASE_URL       = os.getenv("DATABASE_URL")
+    FASTAPI_PROXY_BASE = os.getenv("FASTAPI_PROXY_BASE", "").rstrip("/")
+    STREAMLIT_PUBLIC_URL = os.getenv("STREAMLIT_URL", "")
+
+API_ENABLED = True
+
+# -----------------------------
+# Keep FastAPI and Streamlit warm
+# -----------------------------
+def ping_url(url):
+    try:
+        requests.get(url, timeout=6)
+    except Exception:
+        pass
+
+def pinger_loop():
+    fastapi_health = f"{FASTAPI_PROXY_BASE}/health"
+    streamlit_url  = STREAMLIT_PUBLIC_URL.rstrip("/")
+    while True:
+        ping_url(fastapi_health)
+        ping_url(streamlit_url)
+        time.sleep(300)
+
+threading.Thread(target=pinger_loop, daemon=True).start()
+
+# -----------------------------
+# Database connection (cached for life of session)
+# -----------------------------
+@st.cache_resource
+def get_db_connection():
+    conn = psycopg2.connect(DATABASE_URL)
+    with conn.cursor() as cur:
+        cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
             id SERIAL PRIMARY KEY,
             phone TEXT,
@@ -53,178 +217,411 @@ def ensure_db():
             caption TEXT
         )
         """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS contacts (
+            id SERIAL PRIMARY KEY,
+            phone TEXT UNIQUE,
+            name TEXT
+        )
+        """)
         conn.commit()
-    conn.close()
+    return conn
+
+def ensure_connection(conn):
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        return conn
+    except Exception:
+        st.cache_resource.clear()
+        return get_db_connection()
+
+conn = get_db_connection()
+
+# -----------------------------
+# Query helpers
+# -----------------------------
+def fetch_distinct_phones(conn):
+    conn = ensure_connection(conn)
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT phone FROM messages ORDER BY phone")
+        return [row[0] for row in cur.fetchall()]
+
+@st.cache_data(ttl=300)
+def fetch_contacts_cached(_conn):
+    _conn = ensure_connection(_conn)
+    with _conn.cursor() as cur:
+        cur.execute("SELECT phone, name FROM contacts")
+        return {phone: name for phone, name in cur.fetchall()}
+
+def fetch_messages(conn, phone: str):
+    conn = ensure_connection(conn)
+    with conn.cursor() as cur:
+        if phone == "All":
+            cur.execute(
+                "SELECT * FROM messages ORDER BY timestamp DESC LIMIT 200"
+            )
+            rows = cur.fetchall()
+            return list(reversed(rows))
+        else:
+            cur.execute(
+                "SELECT * FROM messages WHERE phone=%s ORDER BY timestamp ASC",
+                (phone,)
+            )
+            return cur.fetchall()
 
 def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption=""):
-    with conn.cursor() as cursor:
-        cursor.execute("""
+    conn = ensure_connection(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
             INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption))
     conn.commit()
 
 def upsert_contact(conn, phone, name):
-    with conn.cursor() as cursor:
-        cursor.execute("""
+    conn = ensure_connection(conn)
+    with conn.cursor() as cur:
+        cur.execute("""
             INSERT INTO contacts (phone, name)
             VALUES (%s, %s)
             ON CONFLICT(phone) DO UPDATE SET name=EXCLUDED.name
         """, (phone, name))
     conn.commit()
 
-ensure_db()
+@st.cache_data(ttl=300)
+def fetch_message_count(_conn):
+    _conn = ensure_connection(_conn)
+    with _conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM messages")
+        return cur.fetchone()[0]
+
+st_autorefresh(interval=60000, key="messages_refresh")
+
+conn = ensure_connection(conn)
+
+conversation_keys = fetch_distinct_phones(conn)
+contacts = fetch_contacts_cached(conn)
 
 # -----------------------------
-# Health endpoint
+# Avatar helpers (colors for chat bubbles, emoji for sidebar list)
 # -----------------------------
-@app.get("/health")
-def health():
-    return {"status": "ok"}
+AVATAR_COLORS = [
+    "#25D366", "#128C7E", "#075E54", "#34B7F1",
+    "#FF6B6B", "#F7B733", "#A66DD4", "#EE5A6F",
+    "#4ECDC4", "#5C7AEA",
+]
+CIRCLE_EMOJIS = ["🟢", "🔵", "🟣", "🟠", "🔴", "🟡", "🟤", "⚫"]
+
+def get_initials(name: str) -> str:
+    name = (name or "?").strip()
+    parts = [p for p in name.split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+def get_avatar_color(key: str) -> str:
+    h = int(hashlib.md5((key or "?").encode()).hexdigest(), 16)
+    return AVATAR_COLORS[h % len(AVATAR_COLORS)]
+
+def get_avatar_emoji(key: str) -> str:
+    h = int(hashlib.md5((key or "?").encode()).hexdigest(), 16)
+    return CIRCLE_EMOJIS[h % len(CIRCLE_EMOJIS)]
+
+def render_avatar(name: str, key: str) -> str:
+    initials = get_initials(name)
+    color = get_avatar_color(key)
+    return (
+        f"<div style='width:36px; height:36px; border-radius:50%; background:{color}; "
+        f"color:white; display:flex; align-items:center; justify-content:center; "
+        f"font-size:13px; font-weight:600; flex-shrink:0;'>{initials}</div>"
+    )
 
 # -----------------------------
-# Helpers for parsing messages
+# ✅ Sidebar — clickable contact list
 # -----------------------------
-def extract_media_id_from_url(url: str) -> str:
+if "selected_phone" not in st.session_state:
+    st.session_state.selected_phone = "All"
+
+st.sidebar.title("📱 Contacts")
+
+all_selected = st.session_state.selected_phone == "All"
+if st.sidebar.button(
+    "💬  All conversations",
+    key="contact_all",
+    type="primary" if all_selected else "secondary",
+    use_container_width=True,
+):
+    st.session_state.selected_phone = "All"
+    st.rerun()
+
+for p in conversation_keys:
+    name = contacts.get(p, p)
+    emoji = get_avatar_emoji(p)
+    label = f"{emoji}  {name}  ({p})"
+    is_selected = st.session_state.selected_phone == p
+    if st.sidebar.button(
+        label,
+        key=f"contact_btn_{p}",
+        type="primary" if is_selected else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.selected_phone = p
+        st.rerun()
+
+st.sidebar.write("---")
+st.sidebar.write("Total contacts:", len(conversation_keys))
+
+msg_count = fetch_message_count(conn)
+st.sidebar.caption(f"📊 Total messages in DB: {msg_count:,}")
+
+if st.sidebar.button("🔄 Refresh Now", key="refresh_now_btn"):
+    st.cache_data.clear()
+    st.rerun()
+
+selected_phone = st.session_state.selected_phone
+chat_messages = fetch_messages(conn, selected_phone)
+
+# -----------------------------
+# Timestamp helpers
+# -----------------------------
+def format_time_only(ts) -> str:
     try:
-        parsed = urllib.parse.urlparse(url)
-        return parsed.path.rstrip("/").split("/")[-1]
+        t = ts.strftime("%I:%M %p").lstrip("0")
+        return t
     except Exception:
-        return url
+        return str(ts)
 
-def parse_infobip_message(msg):
-    sender = msg.get("from")
-    if not sender:
-        return None
-    contact_name = msg.get("contact", {}).get("name", "").strip() or sender
-    content = msg.get("message", {}) or {}
-    msg_type_raw = str(content.get("type", "TEXT")).upper()
+def format_date_label(ts) -> str:
+    try:
+        msg_date = ts.date() if hasattr(ts, "date") else ts
+        today = date.today()
+        diff = (today - msg_date).days
+        if diff == 0:
+            return "Today"
+        elif diff == 1:
+            return "Yesterday"
+        else:
+            return msg_date.strftime("%B %d, %Y")
+    except Exception:
+        return str(ts)
 
-    text = ""
-    media_identifier = ""
-    caption = ""
-    msg_type = "text"
+# -----------------------------
+# Media proxy helper
+# -----------------------------
+def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
+    if not media_identifier:
+        return ""
+    if direction == "outbound" or media_identifier.startswith("http"):
+        return media_identifier
+    encoded = urllib.parse.quote_plus(media_identifier)
+    return f"{FASTAPI_PROXY_BASE}/media-proxy/{encoded}"
 
-    if msg_type_raw == "TEXT":
-        t = content.get("text", "")
-        text = t.get("body", "") if isinstance(t, dict) else str(t or "")
-        msg_type = "text"
+# -----------------------------
+# Bubble rendering (single-line f-strings, no leading indentation —
+# avoids Streamlit's markdown parser mistaking it for a code block)
+# -----------------------------
+def render_bubble(msg_row, show_header: bool):
+    _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
+    display_name = contacts.get(phone, phone)
+    is_inbound   = direction == "inbound"
+    align        = "flex-start" if is_inbound else "flex-end"
+    bg           = "#FFFFFF" if is_inbound else "#DCF8C6"
+    time_str     = format_time_only(timestamp)
 
-    elif msg_type_raw in ("IMAGE", "VIDEO", "DOCUMENT", "VOICE", "AUDIO"):
-        msg_type = msg_type_raw.lower()
-        caption = content.get("caption", "") or ""
-        media_id = content.get("mediaId") or content.get("id")
-        media_url = content.get("url") or content.get("mediaUrl")
-        if media_id:
-            media_identifier = str(media_id)
-        elif media_url:
-            media_identifier = extract_media_id_from_url(media_url)
+    content_html = "<i>No content</i>"
+    if msg_type in ("text", "contact") or not msg_type:
+        content_html = message_text or "<i>No text content</i>"
+    elif msg_type in ("image", "video", "document", "voice", "audio"):
+        if media_link:
+            proxy = build_proxy_url(media_link, direction)
+            if msg_type == "image":
+                content_html = f"<a href='{proxy}' target='_blank'><img src='{proxy}' style='max-width:220px; border-radius:8px; border:1px solid #ddd;'></a>"
+            elif msg_type == "video":
+                content_html = f"<a href='{proxy}' target='_blank'>View Video</a><br><video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
+            elif msg_type in ("voice", "audio"):
+                content_html = f"<audio controls><source src='{proxy}' type='audio/mpeg'></audio>"
+            elif msg_type == "document":
+                content_html = f"<a href='{proxy}' target='_blank'>Open Document</a>"
+            if caption:
+                content_html += f"<div style='margin-top:6px'>{caption}</div>"
 
-    elif msg_type_raw in ("CONTACT", "CONTACTS"):
-        msg_type = "contact"
-        contacts_list = content.get("contacts") or content.get("contact") or []
-        if isinstance(contacts_list, dict):
-            contacts_list = [contacts_list]
+    ticks_html = " <span style='color:#34B7F1;'>&#10003;&#10003;</span>" if not is_inbound else ""
+    avatar_html = render_avatar(display_name, phone) if (show_header and is_inbound) else "<div style='width:36px; flex-shrink:0;'></div>"
+    header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
 
-        parts = []
-        for c in contacts_list:
-            name_obj = c.get("name", {})
-            display_name = (
-                name_obj.get("formattedName")
-                or name_obj.get("formatted_name")
-                or name_obj.get("firstName")
-                or "Unknown"
-            ) if isinstance(name_obj, dict) else str(name_obj)
+    left_avatar = avatar_html if is_inbound else ""
+    right_avatar = avatar_html if not is_inbound else ""
 
-            phones = c.get("phones") or c.get("phoneNumbers") or []
-            phone_numbers = [
-                p.get("phone") or p.get("number") or str(p)
-                for p in phones
-            ] if phones else []
+    bubble = (
+        f"<div style='display:flex; justify-content:{align}; margin:4px 0; align-items:flex-end; gap:8px;'>"
+        f"{left_avatar}"
+        f"<div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
+        f"{header_html}"
+        f"{content_html}"
+        f"<div style='text-align:right; font-size:11px; color:#667781; margin-top:4px;'>{time_str}{ticks_html}</div>"
+        f"</div>"
+        f"{right_avatar}"
+        f"</div>"
+    )
+    st.markdown(bubble, unsafe_allow_html=True)
 
-            phone_str = ", ".join(phone_numbers) if phone_numbers else "no number"
-            parts.append(f"{display_name} ({phone_str})")
+def render_date_divider(label: str):
+    divider = (
+        f"<div style='text-align:center; margin:14px 0;'>"
+        f"<span style='background:#E1F2FA; color:#54656F; font-size:12px; padding:4px 12px; border-radius:8px;'>{label}</span>"
+        f"</div>"
+    )
+    st.markdown(divider, unsafe_allow_html=True)
 
-        text = "📇 Shared contact: " + "; ".join(parts) if parts else "📇 Shared a contact card"
+# -----------------------------
+# Chat view
+# -----------------------------
+st.title("💬 WhatsApp Chat Dashboard (Live)")
 
-        # Safety net: log the raw payload so we can confirm the real field names
-        logging.info("RAW CONTACT PAYLOAD: %s", json.dumps(msg, default=str))
+if selected_phone == "All":
+    st.subheader("💬 All Conversations (last 200 messages)")
+else:
+    label = f"{contacts.get(selected_phone, selected_phone)} ({selected_phone})"
+    st.subheader(f"💬 Chat with: {label}")
 
+if not chat_messages:
+    st.info("No messages yet for this contact.")
+else:
+    prev_phone = None
+    prev_date = None
+    for m in chat_messages:
+        _, phone, message_text, direction, timestamp, msg_type, media_link, caption = m
+
+        msg_date = timestamp.date() if hasattr(timestamp, "date") else timestamp
+        if msg_date != prev_date:
+            render_date_divider(format_date_label(timestamp))
+            prev_date = msg_date
+            prev_phone = None
+
+        show_header = (phone != prev_phone)
+        render_bubble(m, show_header)
+        prev_phone = phone
+
+# -----------------------------
+# ✅ Auto-scroll to the latest message
+# -----------------------------
+st.markdown('<div id="bottom-anchor"></div>', unsafe_allow_html=True)
+
+components.html(
+    """
+    <script>
+        setTimeout(function() {
+            var anchor = window.parent.document.getElementById('bottom-anchor');
+            if (anchor) {
+                anchor.scrollIntoView({behavior: "instant", block: "end"});
+            }
+        }, 300);
+    </script>
+    """,
+    height=0,
+)
+
+# -----------------------------
+# ✅ Message composer — pill-style row, tied to the selected contact
+# -----------------------------
+st.write("")
+
+if selected_phone == "All":
+    recipient = st.text_input(
+        "Recipient number (include country code)",
+        key="recipient_input_all",
+    )
+else:
+    recipient = selected_phone
+    st.caption(f"Sending to: {contacts.get(selected_phone, selected_phone)} ({selected_phone})")
+
+with st.expander("📎 Attach media (optional)"):
+    media_url = st.text_input(
+        "Image/Video/Document URL (must start with https://)",
+        key="media_url_input",
+    )
+    media_caption = st.text_input("Caption (optional)", key="media_caption_input")
+
+with st.form(key="send_message_form", clear_on_submit=True):
+    col_input, col_send = st.columns([6, 1])
+    with col_input:
+        message_text = st.text_input(
+            "Message",
+            placeholder="Type a message",
+            label_visibility="collapsed",
+        )
+    with col_send:
+        send_clicked = st.form_submit_button("➤")
+
+if send_clicked:
+    recipient_value = (recipient or "").strip()
+    message_value = (message_text or "").strip()
+    media_url_value = (media_url or "").strip()
+    media_caption_value = (media_caption or "").strip()
+
+    if recipient_value and (message_value or media_url_value):
+        conn = ensure_connection(conn)
+
+        if media_url_value:
+            url_lower = media_url_value.lower()
+            if url_lower.endswith((".jpg", ".jpeg", ".png", ".gif")):
+                msg_type = "image"
+                api_url  = IMAGE_API_URL
+            elif url_lower.endswith((".mp4", ".mov", ".webm")):
+                msg_type = "video"
+                api_url  = VIDEO_API_URL
+            else:
+                msg_type = "document"
+                api_url  = DOCUMENT_API_URL
+
+            media_link   = media_url_value
+            message_body = ""
+            caption      = media_caption_value
+        else:
+            msg_type     = "text"
+            api_url      = TEXT_API_URL
+            media_link   = ""
+            message_body = message_value
+            caption      = ""
+
+        insert_message(conn, recipient_value, message_body, "outbound", msg_type, media_link, caption)
+        st.cache_data.clear()
+        st.success("✅ Message saved locally!")
+
+        if API_ENABLED:
+            headers = {
+                "Authorization": f"App {API_KEY}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            message_id = str(uuid.uuid4())
+            payload = {
+                "from": SANDBOX_NUMBER,
+                "to": recipient_value,
+                "messageId": message_id,
+                "content": (
+                    {"text": message_body} if msg_type == "text"
+                    else {"mediaUrl": media_link, "caption": caption}
+                ),
+                "callbackData": "Callback data",
+                "notifyUrl": f"{FASTAPI_PROXY_BASE}/whatsapp/inbound",
+                "urlOptions": {
+                    "shortenUrl": True,
+                    "trackClicks": False,
+                    "removeProtocol": True
+                }
+            }
+            try:
+                response = requests.post(api_url, headers=headers, json=payload, timeout=15)
+                if response.status_code in (200, 201):
+                    st.success(f"✅ Message sent successfully to {recipient_value}!")
+                else:
+                    st.error(f"❌ API failed: {response.status_code} {response.text}")
+            except Exception as e:
+                st.error(f"⚠️ Connection error: {e}")
+        st.rerun()
     else:
-        # Catch-all for any other/unhandled type (location, sticker, button reply, etc.)
-        msg_type = msg_type_raw.lower()
-        t = content.get("text", "")
-        text = t.get("body", "") if isinstance(t, dict) else str(t or "")
-        if not text:
-            text = f"[Unsupported message type: {msg_type_raw}]"
-            logging.info("RAW UNHANDLED PAYLOAD (%s): %s", msg_type_raw, json.dumps(msg, default=str))
-
-    return text, msg_type, media_identifier, caption, sender, contact_name
-
-# -----------------------------
-# Inbound webhook
-# -----------------------------
-@app.post("/whatsapp/inbound")
-async def inbound(request: Request):
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-
-    results = payload.get("results", []) or payload.get("messages", [])
-    if not results:
-        return JSONResponse({"status": "ok", "received": 0})
-
-    conn = get_pg_connection()
-    received = 0
-    try:
-        for msg in results:
-            parsed = parse_infobip_message(msg)
-            if not parsed:
-                continue
-            text, msg_type, media_id, caption, sender, name = parsed
-            upsert_contact(conn, sender, name)
-            insert_message(conn, sender, text, "inbound", msg_type, media_id, caption)
-            received += 1
-        return {"status": "ok", "received": received}
-    finally:
-        conn.close()
-
-# -----------------------------
-# Media proxy endpoint
-# -----------------------------
-@app.get("/media-proxy/{media_identifier}")
-def media_proxy(media_identifier: str):
-    if not AUTH_HEADER or not SENDER_NUMBER:
-        raise HTTPException(status_code=500, detail="Media proxy misconfigured")
-
-    media_id = urllib.parse.unquote_plus(media_identifier)
-    url = f"{MEDIA_BASE_URL}/whatsapp/1/senders/{SENDER_NUMBER}/media/{media_id}"
-    headers = {"Authorization": AUTH_HEADER, "Accept": "*/*"}
-
-    try:
-        resp = requests.get(url, headers=headers, stream=True, timeout=30)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error fetching media: {e}")
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=resp.status_code, detail=f"Infobip error: {resp.status_code} {resp.text[:500]}")
-
-    content_type = resp.headers.get("Content-Type", "application/octet-stream")
-
-    def iter_stream():
-        try:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
-        finally:
-            resp.close()
-
-    return StreamingResponse(iter_stream(), media_type=content_type)
-
-# -----------------------------
-# Run server locally (for dev)
-# -----------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        st.warning("Please fill recipient and message or media URL.")
