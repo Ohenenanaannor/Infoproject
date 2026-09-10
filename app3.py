@@ -20,9 +20,101 @@ load_dotenv()
 st.set_page_config(page_title="WhatsApp Chat Dashboard", page_icon="💬", layout="centered")
 
 # -----------------------------
+# ✅ WhatsApp-style theme (CSS injection)
+# -----------------------------
+def inject_whatsapp_theme():
+    st.markdown("""
+    <style>
+        [data-testid="stAppViewContainer"] {
+            background-color: #ECE5DD;
+        }
+        [data-testid="stHeader"] {
+            background-color: rgba(0,0,0,0);
+        }
+        [data-testid="stSidebar"] {
+            background-color: #075E54;
+        }
+        [data-testid="stSidebar"] * {
+            color: #F0F2F1 !important;
+        }
+        h1, h2, h3 {
+            color: #075E54 !important;
+        }
+
+        /* Default button styling (main area) — teal pill */
+        .stButton > button {
+            background-color: #00A884;
+            color: white;
+            border-radius: 20px;
+            border: none;
+            padding: 0.5em 1.2em;
+            font-weight: 600;
+        }
+        .stButton > button:hover {
+            background-color: #06997A;
+            color: white;
+        }
+
+        /* Sidebar contact-list buttons — flat rows, not pills */
+        [data-testid="stSidebar"] .stButton > button {
+            background-color: transparent;
+            color: #F0F2F1;
+            border: none;
+            border-radius: 8px;
+            text-align: left;
+            justify-content: flex-start;
+            padding: 8px 10px;
+            font-weight: 400;
+            width: 100%;
+            display: flex;
+        }
+        [data-testid="stSidebar"] .stButton > button:hover {
+            background-color: rgba(255,255,255,0.08);
+            color: #F0F2F1;
+        }
+        /* Selected contact row (Streamlit "primary" button type) */
+        [data-testid="stSidebar"] .stButton > button[kind="primary"] {
+            background-color: #128C7E;
+            color: white;
+            font-weight: 500;
+        }
+        [data-testid="stSidebar"] .stButton > button[kind="primary"]:hover {
+            background-color: #128C7E;
+        }
+
+        /* Text inputs / text areas — rounded, soft border, green focus */
+        div[data-baseweb="input"] > div,
+        div[data-baseweb="textarea"] > div {
+            border-radius: 20px !important;
+            border: 1px solid #D1D7D3 !important;
+            background-color: #FFFFFF !important;
+        }
+        div[data-baseweb="input"] > div:focus-within,
+        div[data-baseweb="textarea"] > div:focus-within {
+            border: 1px solid #00A884 !important;
+            box-shadow: 0 0 0 1px #00A884 !important;
+        }
+
+        div[data-testid="stAlert"] {
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #B7C2BE;
+            border-radius: 10px;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+inject_whatsapp_theme()
+
+# -----------------------------
 # Sidebar reset button
 # -----------------------------
-if st.sidebar.button("♻️ Reset App / Reconnect DB"):
+if st.sidebar.button("♻️ Reset App / Reconnect DB", key="reset_app_btn"):
     st.cache_resource.clear()
     st.cache_data.clear()
     st.session_state.clear()
@@ -206,45 +298,20 @@ def fetch_message_count(_conn):
 
 st_autorefresh(interval=60000, key="messages_refresh")
 
-# -----------------------------
-# Sidebar
-# -----------------------------
 conn = ensure_connection(conn)
 
 conversation_keys = fetch_distinct_phones(conn)
 contacts = fetch_contacts_cached(conn)
 
-contact_display_names = ["All"] + [
-    f"{contacts.get(p, p)} ({p})" for p in conversation_keys
-]
-
-st.sidebar.title("📱 Contacts")
-selected_display = st.sidebar.selectbox("Select a conversation", contact_display_names)
-st.sidebar.write("---")
-st.sidebar.write("Total contacts:", len(conversation_keys))
-
-msg_count = fetch_message_count(conn)
-st.sidebar.caption(f"📊 Total messages in DB: {msg_count:,}")
-
-if st.sidebar.button("🔄 Refresh Now"):
-    st.cache_data.clear()
-    st.rerun()
-
-selected_phone = (
-    "All" if selected_display == "All"
-    else selected_display.split("(")[-1].replace(")", "")
-)
-
-chat_messages = fetch_messages(conn, selected_phone)
-
 # -----------------------------
-# Avatar helpers
+# Avatar helpers (colors for chat bubbles, emoji for sidebar list)
 # -----------------------------
 AVATAR_COLORS = [
     "#25D366", "#128C7E", "#075E54", "#34B7F1",
     "#FF6B6B", "#F7B733", "#A66DD4", "#EE5A6F",
     "#4ECDC4", "#5C7AEA",
 ]
+CIRCLE_EMOJIS = ["🟢", "🔵", "🟣", "🟠", "🔴", "🟡", "🟤", "⚫"]
 
 def get_initials(name: str) -> str:
     name = (name or "?").strip()
@@ -259,6 +326,10 @@ def get_avatar_color(key: str) -> str:
     h = int(hashlib.md5((key or "?").encode()).hexdigest(), 16)
     return AVATAR_COLORS[h % len(AVATAR_COLORS)]
 
+def get_avatar_emoji(key: str) -> str:
+    h = int(hashlib.md5((key or "?").encode()).hexdigest(), 16)
+    return CIRCLE_EMOJIS[h % len(CIRCLE_EMOJIS)]
+
 def render_avatar(name: str, key: str) -> str:
     initials = get_initials(name)
     color = get_avatar_color(key)
@@ -267,6 +338,51 @@ def render_avatar(name: str, key: str) -> str:
         f"color:white; display:flex; align-items:center; justify-content:center; "
         f"font-size:13px; font-weight:600; flex-shrink:0;'>{initials}</div>"
     )
+
+# -----------------------------
+# ✅ Sidebar — clickable contact list
+# -----------------------------
+if "selected_phone" not in st.session_state:
+    st.session_state.selected_phone = "All"
+
+st.sidebar.title("📱 Contacts")
+
+all_selected = st.session_state.selected_phone == "All"
+if st.sidebar.button(
+    "💬  All conversations",
+    key="contact_all",
+    type="primary" if all_selected else "secondary",
+    use_container_width=True,
+):
+    st.session_state.selected_phone = "All"
+    st.rerun()
+
+for p in conversation_keys:
+    name = contacts.get(p, p)
+    emoji = get_avatar_emoji(p)
+    label = f"{emoji}  {name}  ({p})"
+    is_selected = st.session_state.selected_phone == p
+    if st.sidebar.button(
+        label,
+        key=f"contact_btn_{p}",
+        type="primary" if is_selected else "secondary",
+        use_container_width=True,
+    ):
+        st.session_state.selected_phone = p
+        st.rerun()
+
+st.sidebar.write("---")
+st.sidebar.write("Total contacts:", len(conversation_keys))
+
+msg_count = fetch_message_count(conn)
+st.sidebar.caption(f"📊 Total messages in DB: {msg_count:,}")
+
+if st.sidebar.button("🔄 Refresh Now", key="refresh_now_btn"):
+    st.cache_data.clear()
+    st.rerun()
+
+selected_phone = st.session_state.selected_phone
+chat_messages = fetch_messages(conn, selected_phone)
 
 # -----------------------------
 # Timestamp helpers
@@ -304,16 +420,15 @@ def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
     return f"{FASTAPI_PROXY_BASE}/media-proxy/{encoded}"
 
 # -----------------------------
-# Bubble rendering (with grouping, avatars, ticks)
-# NOTE: built as single-line f-strings, no leading indentation,
-# so Streamlit's markdown parser doesn't mistake it for a code block.
+# Bubble rendering (single-line f-strings, no leading indentation —
+# avoids Streamlit's markdown parser mistaking it for a code block)
 # -----------------------------
 def render_bubble(msg_row, show_header: bool):
     _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
     display_name = contacts.get(phone, phone)
     is_inbound   = direction == "inbound"
     align        = "flex-start" if is_inbound else "flex-end"
-    bg           = "#ffffff" if is_inbound else "#dcf8c6"
+    bg           = "#FFFFFF" if is_inbound else "#DCF8C6"
     time_str     = format_time_only(timestamp)
 
     content_html = "<i>No content</i>"
@@ -343,10 +458,10 @@ def render_bubble(msg_row, show_header: bool):
     bubble = (
         f"<div style='display:flex; justify-content:{align}; margin:4px 0; align-items:flex-end; gap:8px;'>"
         f"{left_avatar}"
-        f"<div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; border:1px solid #ddd;'>"
+        f"<div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
         f"{header_html}"
         f"{content_html}"
-        f"<div style='text-align:right; font-size:11px; color:#666; margin-top:4px;'>{time_str}{ticks_html}</div>"
+        f"<div style='text-align:right; font-size:11px; color:#667781; margin-top:4px;'>{time_str}{ticks_html}</div>"
         f"</div>"
         f"{right_avatar}"
         f"</div>"
@@ -356,7 +471,7 @@ def render_bubble(msg_row, show_header: bool):
 def render_date_divider(label: str):
     divider = (
         f"<div style='text-align:center; margin:14px 0;'>"
-        f"<span style='background:#e9edef; color:#54656f; font-size:12px; padding:4px 12px; border-radius:8px;'>{label}</span>"
+        f"<span style='background:#E1F2FA; color:#54656F; font-size:12px; padding:4px 12px; border-radius:8px;'>{label}</span>"
         f"</div>"
     )
     st.markdown(divider, unsafe_allow_html=True)
@@ -410,20 +525,48 @@ components.html(
 )
 
 # -----------------------------
-# Send new message
+# ✅ Message composer — pill-style row, tied to the selected contact
 # -----------------------------
-st.subheader("Send a New WhatsApp Message")
-recipient    = st.text_input("Recipient number (include country code)")
-message_text = st.text_area("Message (text only)")
-media_url    = st.text_input("Image/Video/Document URL (optional, must start with https://)")
-media_caption = st.text_input("Caption (optional)")
+st.write("")
 
-if st.button("Send"):
-    if recipient.strip() and (message_text.strip() or media_url.strip()):
+if selected_phone == "All":
+    recipient = st.text_input(
+        "Recipient number (include country code)",
+        key="recipient_input_all",
+    )
+else:
+    recipient = selected_phone
+    st.caption(f"Sending to: {contacts.get(selected_phone, selected_phone)} ({selected_phone})")
+
+with st.expander("📎 Attach media (optional)"):
+    media_url = st.text_input(
+        "Image/Video/Document URL (must start with https://)",
+        key="media_url_input",
+    )
+    media_caption = st.text_input("Caption (optional)", key="media_caption_input")
+
+with st.form(key="send_message_form", clear_on_submit=True):
+    col_input, col_send = st.columns([6, 1])
+    with col_input:
+        message_text = st.text_input(
+            "Message",
+            placeholder="Type a message",
+            label_visibility="collapsed",
+        )
+    with col_send:
+        send_clicked = st.form_submit_button("➤")
+
+if send_clicked:
+    recipient_value = (recipient or "").strip()
+    message_value = (message_text or "").strip()
+    media_url_value = (media_url or "").strip()
+    media_caption_value = (media_caption or "").strip()
+
+    if recipient_value and (message_value or media_url_value):
         conn = ensure_connection(conn)
 
-        if media_url.strip():
-            url_lower = media_url.lower()
+        if media_url_value:
+            url_lower = media_url_value.lower()
             if url_lower.endswith((".jpg", ".jpeg", ".png", ".gif")):
                 msg_type = "image"
                 api_url  = IMAGE_API_URL
@@ -434,17 +577,17 @@ if st.button("Send"):
                 msg_type = "document"
                 api_url  = DOCUMENT_API_URL
 
-            media_link   = media_url.strip()
+            media_link   = media_url_value
             message_body = ""
-            caption      = media_caption.strip()
+            caption      = media_caption_value
         else:
             msg_type     = "text"
             api_url      = TEXT_API_URL
             media_link   = ""
-            message_body = message_text.strip()
+            message_body = message_value
             caption      = ""
 
-        insert_message(conn, recipient, message_body, "outbound", msg_type, media_link, caption)
+        insert_message(conn, recipient_value, message_body, "outbound", msg_type, media_link, caption)
         st.cache_data.clear()
         st.success("✅ Message saved locally!")
 
@@ -457,7 +600,7 @@ if st.button("Send"):
             message_id = str(uuid.uuid4())
             payload = {
                 "from": SANDBOX_NUMBER,
-                "to": recipient,
+                "to": recipient_value,
                 "messageId": message_id,
                 "content": (
                     {"text": message_body} if msg_type == "text"
@@ -474,10 +617,11 @@ if st.button("Send"):
             try:
                 response = requests.post(api_url, headers=headers, json=payload, timeout=15)
                 if response.status_code in (200, 201):
-                    st.success(f"✅ Message sent successfully to {recipient}!")
+                    st.success(f"✅ Message sent successfully to {recipient_value}!")
                 else:
                     st.error(f"❌ API failed: {response.status_code} {response.text}")
             except Exception as e:
                 st.error(f"⚠️ Connection error: {e}")
+        st.rerun()
     else:
         st.warning("Please fill recipient and message or media URL.")
