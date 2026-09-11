@@ -523,13 +523,6 @@ with col_attach:
             key="media_url_input",
         )
         media_caption = st.text_input("Caption (optional)", key="media_caption_input")
-        st.markdown("---")
-        st.caption("📷 Camera — coming soon")
-        st.caption("🎧 Audio — coming soon")
-        st.caption("👤 Contact — coming soon")
-        st.caption("📊 Poll — coming soon")
-        st.caption("📅 Event — coming soon")
-        st.caption("😊 New sticker — coming soon")
 
 with col_form:
     with st.form(key="send_message_form", clear_on_submit=True):
