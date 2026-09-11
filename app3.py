@@ -523,7 +523,7 @@ components.html(
 )
 
 # -----------------------------
-# ✅ Message composer — attach menu, voice recorder, text box, send button
+# ✅ Message composer — "+" attach menu, text box, send button
 # -----------------------------
 st.write("")
 
@@ -546,8 +546,15 @@ with col_attach:
             key="media_url_input",
         )
         media_caption = st.text_input("Caption (optional)", key="media_caption_input")
-
-recorded_audio = st.audio_input("🎙️ Record a voice note", key="voice_recorder")
+        st.markdown("---")
+        st.markdown("**🎙️ Voice note**")
+        recorded_audio_widget = st.audio_input("Record a voice note", key="voice_recorder")
+        if recorded_audio_widget is not None:
+            st.session_state["captured_voice_bytes"] = recorded_audio_widget.getvalue()
+            st.caption("✅ Recording captured — ready to send")
+        if st.session_state.get("captured_voice_bytes") and st.button("🗑️ Discard recording", key="discard_voice_btn"):
+            st.session_state.pop("captured_voice_bytes", None)
+            st.rerun()
 
 with col_form:
     with st.form(key="send_message_form", clear_on_submit=True):
@@ -566,15 +573,15 @@ if send_clicked:
     message_value = (message_text or "").strip()
     media_url_value = (media_url or "").strip()
     media_caption_value = (media_caption or "").strip()
+    captured_voice_bytes = st.session_state.get("captured_voice_bytes")
 
     if not recipient_value:
         st.warning("Please select or enter a recipient.")
-    elif recorded_audio is not None:
+    elif captured_voice_bytes:
         # ✅ Voice note takes priority if recorded
         try:
             with st.spinner("Converting and uploading voice note..."):
-                raw_bytes = recorded_audio.getvalue()
-                ogg_bytes = convert_to_ogg_opus(raw_bytes)
+                ogg_bytes = convert_to_ogg_opus(captured_voice_bytes)
                 public_url = upload_audio_and_get_url(ogg_bytes)
 
             conn = ensure_connection(conn)
@@ -607,6 +614,8 @@ if send_clicked:
                     st.success(f"✅ Voice note sent to {recipient_value}!")
                 else:
                     st.error(f"❌ API failed: {response.status_code} {response.text}")
+
+            st.session_state.pop("captured_voice_bytes", None)
             st.rerun()
         except Exception as e:
             st.error(f"⚠️ Voice note error: {e}")
@@ -673,4 +682,4 @@ if send_clicked:
                 st.error(f"⚠️ Connection error: {e}")
         st.rerun()
     else:
-        st.warning("Please fill recipient and media URL.")
+        st.warning("Please fill recipient and message or media URL.")
