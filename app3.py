@@ -523,7 +523,7 @@ components.html(
 )
 
 # -----------------------------
-# ✅ Message composer — "+" attach menu (media + voice), text box, send button
+# ✅ Message composer — attach menu, voice recorder, text box, send button
 # -----------------------------
 st.write("")
 
@@ -546,9 +546,8 @@ with col_attach:
             key="media_url_input",
         )
         media_caption = st.text_input("Caption (optional)", key="media_caption_input")
-        st.markdown("---")
-        st.markdown("**🎙️ Voice note**")
-        recorded_audio = st.audio_input("Record a voice note", key="voice_recorder")
+
+recorded_audio = st.audio_input("🎙️ Record a voice note", key="voice_recorder")
 
 with col_form:
     with st.form(key="send_message_form", clear_on_submit=True):
@@ -674,4 +673,4 @@ if send_clicked:
                 st.error(f"⚠️ Connection error: {e}")
         st.rerun()
     else:
-        st.warning("Please fill recipient and message or media URL.")
+        st.warning("Please fill recipient and media URL.")
