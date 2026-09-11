@@ -3,9 +3,12 @@ import json
 import os
 import logging
 import urllib.parse
+import uuid
+from pathlib import Path
 import requests
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from dotenv import load_dotenv
 import psycopg2
@@ -24,6 +27,13 @@ AUTH_HEADER = f"App {API_KEY}" if API_KEY else None
 if not DATABASE_URL:
     logging.error("DATABASE_URL not set. Exiting.")
     raise RuntimeError("DATABASE_URL is required")
+
+# -----------------------------
+# ✅ Audio upload storage
+# -----------------------------
+AUDIO_UPLOAD_DIR = Path("uploaded_audio")
+AUDIO_UPLOAD_DIR.mkdir(exist_ok=True)
+app.mount("/audio-files", StaticFiles(directory=str(AUDIO_UPLOAD_DIR)), name="audio-files")
 
 def get_pg_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -75,6 +85,22 @@ ensure_db()
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+# -----------------------------
+# ✅ Audio upload endpoint
+# -----------------------------
+@app.post("/upload-audio")
+async def upload_audio(request: Request, file: UploadFile = File(...)):
+    try:
+        filename = f"{uuid.uuid4()}.ogg"
+        filepath = AUDIO_UPLOAD_DIR / filename
+        content = await file.read()
+        with open(filepath, "wb") as f:
+            f.write(content)
+        public_url = str(request.base_url).rstrip("/") + f"/audio-files/{filename}"
+        return {"url": public_url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
 
 def extract_media_id_from_url(url: str) -> str:
     try:

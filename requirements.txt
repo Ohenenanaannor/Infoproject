@@ -9,3 +9,4 @@ pydantic_core==2.41.5
 SQLAlchemy>=1.4
 psycopg2-binary
 typing_extensions
+python-multipart
