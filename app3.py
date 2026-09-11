@@ -5,12 +5,14 @@ import time
 import urllib.parse
 import uuid
 import hashlib
+import io
 from datetime import datetime, date
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
 from streamlit_autorefresh import st_autorefresh
 from dotenv import load_dotenv
+from pydub import AudioSegment
 
 load_dotenv()
 
@@ -139,6 +141,7 @@ try:
     IMAGE_API_URL      = st.secrets["IMAGE_API_URL"]
     VIDEO_API_URL      = st.secrets["VIDEO_API_URL"]
     DOCUMENT_API_URL   = st.secrets["DOCUMENT_API_URL"]
+    AUDIO_API_URL      = st.secrets["AUDIO_API_URL"]
     NGROK_URL          = st.secrets["NGROK_URL"]
     DATABASE_URL       = st.secrets["DATABASE_URL"]
     FASTAPI_PROXY_BASE = st.secrets["FASTAPI_PROXY_BASE"].rstrip("/")
@@ -150,6 +153,7 @@ except Exception:
     IMAGE_API_URL      = os.getenv("IMAGE_API_URL")
     VIDEO_API_URL      = os.getenv("VIDEO_API_URL")
     DOCUMENT_API_URL   = os.getenv("DOCUMENT_API_URL")
+    AUDIO_API_URL      = os.getenv("AUDIO_API_URL")
     NGROK_URL          = os.getenv("NGROK_URL")
     DATABASE_URL       = os.getenv("DATABASE_URL")
     FASTAPI_PROXY_BASE = os.getenv("FASTAPI_PROXY_BASE", "").rstrip("/")
@@ -396,6 +400,25 @@ def build_proxy_url(media_identifier: str, direction: str = "inbound") -> str:
     return f"{FASTAPI_PROXY_BASE}/media-proxy/{encoded}"
 
 # -----------------------------
+# ✅ Voice note helpers
+# -----------------------------
+def convert_to_ogg_opus(audio_bytes: bytes) -> bytes:
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+    out_buffer = io.BytesIO()
+    audio.export(out_buffer, format="ogg", codec="libopus")
+    return out_buffer.getvalue()
+
+def upload_audio_and_get_url(ogg_bytes: bytes) -> str:
+    files = {"file": ("voice.ogg", ogg_bytes, "audio/ogg")}
+    response = requests.post(
+        f"{FASTAPI_PROXY_BASE}/upload-audio",
+        files=files,
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["url"]
+
+# -----------------------------
 # Bubble rendering
 # -----------------------------
 def render_bubble(msg_row, show_header: bool):
@@ -417,7 +440,7 @@ def render_bubble(msg_row, show_header: bool):
             elif msg_type == "video":
                 content_html = f"<a href='{proxy}' target='_blank'>View Video</a><br><video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
             elif msg_type in ("voice", "audio"):
-                content_html = f"<audio controls><source src='{proxy}' type='audio/mpeg'></audio>"
+                content_html = f"<audio controls><source src='{proxy}' type='audio/ogg'></audio>"
             elif msg_type == "document":
                 content_html = f"<a href='{proxy}' target='_blank'>Open Document</a>"
             if caption:
@@ -500,7 +523,7 @@ components.html(
 )
 
 # -----------------------------
-# ✅ Message composer — "+" attach menu, text box, send button
+# ✅ Message composer — "+" attach menu (media + voice), text box, send button
 # -----------------------------
 st.write("")
 
@@ -523,6 +546,9 @@ with col_attach:
             key="media_url_input",
         )
         media_caption = st.text_input("Caption (optional)", key="media_caption_input")
+        st.markdown("---")
+        st.markdown("**🎙️ Voice note**")
+        recorded_audio = st.audio_input("Record a voice note", key="voice_recorder")
 
 with col_form:
     with st.form(key="send_message_form", clear_on_submit=True):
@@ -542,7 +568,51 @@ if send_clicked:
     media_url_value = (media_url or "").strip()
     media_caption_value = (media_caption or "").strip()
 
-    if recipient_value and (message_value or media_url_value):
+    if not recipient_value:
+        st.warning("Please select or enter a recipient.")
+    elif recorded_audio is not None:
+        # ✅ Voice note takes priority if recorded
+        try:
+            with st.spinner("Converting and uploading voice note..."):
+                raw_bytes = recorded_audio.getvalue()
+                ogg_bytes = convert_to_ogg_opus(raw_bytes)
+                public_url = upload_audio_and_get_url(ogg_bytes)
+
+            conn = ensure_connection(conn)
+            insert_message(conn, recipient_value, "", "outbound", "voice", public_url, "")
+            st.cache_data.clear()
+            st.success("✅ Voice note saved locally!")
+
+            if API_ENABLED:
+                headers = {
+                    "Authorization": f"App {API_KEY}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json"
+                }
+                message_id = str(uuid.uuid4())
+                payload = {
+                    "from": SANDBOX_NUMBER,
+                    "to": recipient_value,
+                    "messageId": message_id,
+                    "content": {"mediaUrl": public_url},
+                    "callbackData": "Callback data",
+                    "notifyUrl": f"{FASTAPI_PROXY_BASE}/whatsapp/inbound",
+                    "urlOptions": {
+                        "shortenUrl": True,
+                        "trackClicks": False,
+                        "removeProtocol": True
+                    }
+                }
+                response = requests.post(AUDIO_API_URL, headers=headers, json=payload, timeout=15)
+                if response.status_code in (200, 201):
+                    st.success(f"✅ Voice note sent to {recipient_value}!")
+                else:
+                    st.error(f"❌ API failed: {response.status_code} {response.text}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"⚠️ Voice note error: {e}")
+
+    elif recipient_value and (message_value or media_url_value):
         conn = ensure_connection(conn)
 
         if media_url_value:

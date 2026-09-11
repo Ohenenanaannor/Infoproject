@@ -10,3 +10,4 @@ SQLAlchemy>=1.4
 psycopg2-binary
 typing_extensions
 python-multipart
+pydub
