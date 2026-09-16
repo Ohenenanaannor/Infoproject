@@ -86,21 +86,6 @@ def inject_whatsapp_theme():
             background: #B7C2BE;
             border-radius: 10px;
         }
-
-        /* Small action-row buttons under each bubble */
-        .msg-action-row .stButton > button {
-            background-color: transparent;
-            color: #667781;
-            border: none;
-            border-radius: 6px;
-            padding: 2px 6px;
-            font-size: 12px;
-            font-weight: 400;
-        }
-        .msg-action-row .stButton > button:hover {
-            background-color: rgba(0,0,0,0.06);
-            color: #075E54;
-        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -473,7 +458,6 @@ def send_text_or_media(recipient_value, message_body, media_link, caption, msg_t
             "removeProtocol": True
         }
     }
-    # ✅ Best-guess contextual-reply field — verify with a real test send
     if reply_wamid:
         payload["context"] = {"messageId": reply_wamid}
 
@@ -528,51 +512,56 @@ def render_bubble(msg_row, show_header: bool):
     )
     st.markdown(bubble, unsafe_allow_html=True)
 
-    # ✅ Action row: star / reply / forward / delete
+    # ✅ Single "⋮" dropdown menu, WhatsApp-style
     indent = "flex-end" if not is_inbound else "flex-start"
-    st.markdown(f"<div class='msg-action-row' style='display:flex; justify-content:{indent}; margin:0 0 4px 44px;'>", unsafe_allow_html=True)
-    a1, a2, a3, a4 = st.columns([1, 1, 1, 1])
-    with a1:
-        star_label = "⭐" if starred else "☆"
-        if st.button(star_label, key=f"star_{msg_id}"):
-            toggle_star(conn, msg_id)
-            st.cache_data.clear()
-            st.rerun()
-    with a2:
-        if st.button("↩️", key=f"reply_{msg_id}"):
+    st.markdown(f"<div style='display:flex; justify-content:{indent}; margin:0 0 6px 44px;'>", unsafe_allow_html=True)
+    with st.popover("⋮", use_container_width=False):
+        if st.button("↩️ Reply", key=f"reply_{msg_id}", use_container_width=True):
             preview = (message_text or f"[{msg_type}]")[:80]
             st.session_state["reply_to"] = {"id": msg_id, "wamid": wamid, "preview": preview}
             st.rerun()
-    with a3:
-        with st.popover("➡️"):
-            fwd_number = st.text_input("Forward to (number)", key=f"fwd_number_{msg_id}")
-            if st.button("Send forward", key=f"fwd_send_{msg_id}"):
-                fwd_number_clean = (fwd_number or "").strip()
-                if fwd_number_clean:
-                    if msg_type in ("text", "contact") or not msg_type:
-                        resp = send_text_or_media(fwd_number_clean, message_text or "", "", "", "text", TEXT_API_URL)
-                    else:
-                        api_map = {
-                            "image": IMAGE_API_URL, "video": VIDEO_API_URL,
-                            "document": DOCUMENT_API_URL, "voice": AUDIO_API_URL, "audio": AUDIO_API_URL,
-                        }
-                        resp = send_text_or_media(fwd_number_clean, "", media_link, caption or "", msg_type, api_map.get(msg_type, DOCUMENT_API_URL))
-                    if resp.status_code in (200, 201):
-                        insert_message(conn, fwd_number_clean, message_text or "", "outbound", msg_type, media_link or "", caption or "")
-                        st.cache_data.clear()
-                        st.success("Forwarded!")
-                        st.rerun()
-                    else:
-                        st.error(f"Forward failed: {resp.status_code} {resp.text}")
+
+        star_label = "⭐ Unstar" if starred else "☆ Star"
+        if st.button(star_label, key=f"star_{msg_id}", use_container_width=True):
+            toggle_star(conn, msg_id)
+            st.cache_data.clear()
+            st.rerun()
+
+        st.markdown("**➡️ Forward**")
+        fwd_number = st.text_input("Number", key=f"fwd_number_{msg_id}", label_visibility="collapsed", placeholder="Forward to number")
+        if st.button("Send forward", key=f"fwd_send_{msg_id}", use_container_width=True):
+            fwd_number_clean = (fwd_number or "").strip()
+            if fwd_number_clean:
+                if msg_type in ("text", "contact") or not msg_type:
+                    resp = send_text_or_media(fwd_number_clean, message_text or "", "", "", "text", TEXT_API_URL)
                 else:
-                    st.warning("Enter a number to forward to.")
-    with a4:
-        with st.popover("🗑️"):
-            st.write("Delete this message from your dashboard?")
-            st.caption("This does not delete it from the customer's WhatsApp.")
-            if st.button("Confirm delete", key=f"del_confirm_{msg_id}"):
+                    api_map = {
+                        "image": IMAGE_API_URL, "video": VIDEO_API_URL,
+                        "document": DOCUMENT_API_URL, "voice": AUDIO_API_URL, "audio": AUDIO_API_URL,
+                    }
+                    resp = send_text_or_media(fwd_number_clean, "", media_link, caption or "", msg_type, api_map.get(msg_type, DOCUMENT_API_URL))
+                if resp.status_code in (200, 201):
+                    insert_message(conn, fwd_number_clean, message_text or "", "outbound", msg_type, media_link or "", caption or "")
+                    st.cache_data.clear()
+                    st.success("Forwarded!")
+                    st.rerun()
+                else:
+                    st.error(f"Forward failed: {resp.status_code} {resp.text}")
+            else:
+                st.warning("Enter a number to forward to.")
+
+        st.markdown("---")
+
+        if st.session_state.get(f"confirm_delete_{msg_id}"):
+            st.warning("Delete this message from your dashboard? (Not from the customer's WhatsApp)")
+            if st.button("✅ Confirm delete", key=f"del_confirm_{msg_id}", use_container_width=True):
                 delete_message_by_id(conn, msg_id)
                 st.cache_data.clear()
+                st.session_state.pop(f"confirm_delete_{msg_id}", None)
+                st.rerun()
+        else:
+            if st.button("🗑️ Delete", key=f"del_start_{msg_id}", use_container_width=True):
+                st.session_state[f"confirm_delete_{msg_id}"] = True
                 st.rerun()
     st.markdown("</div>", unsafe_allow_html=True)
 
