@@ -86,6 +86,21 @@ def inject_whatsapp_theme():
             background: #B7C2BE;
             border-radius: 10px;
         }
+
+        /* Small action-row buttons under each bubble */
+        .msg-action-row .stButton > button {
+            background-color: transparent;
+            color: #667781;
+            border: none;
+            border-radius: 6px;
+            padding: 2px 6px;
+            font-size: 12px;
+            font-weight: 400;
+        }
+        .msg-action-row .stButton > button:hover {
+            background-color: rgba(0,0,0,0.06);
+            color: #075E54;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -206,6 +221,8 @@ def get_db_connection():
             name TEXT
         )
         """)
+        cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS starred BOOLEAN DEFAULT FALSE")
+        cur.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS wamid TEXT")
         conn.commit()
     return conn
 
@@ -241,24 +258,26 @@ def fetch_messages(conn, phone: str):
     with conn.cursor() as cur:
         if phone == "All":
             cur.execute(
-                "SELECT * FROM messages ORDER BY timestamp DESC LIMIT 200"
+                "SELECT id, phone, message, direction, timestamp, message_type, media_link, caption, starred, wamid "
+                "FROM messages ORDER BY timestamp DESC LIMIT 200"
             )
             rows = cur.fetchall()
             return list(reversed(rows))
         else:
             cur.execute(
-                "SELECT * FROM messages WHERE phone=%s ORDER BY timestamp ASC",
+                "SELECT id, phone, message, direction, timestamp, message_type, media_link, caption, starred, wamid "
+                "FROM messages WHERE phone=%s ORDER BY timestamp ASC",
                 (phone,)
             )
             return cur.fetchall()
 
-def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption=""):
+def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption="", wamid=""):
     conn = ensure_connection(conn)
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption))
+            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption, wamid)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption, wamid))
     conn.commit()
 
 def upsert_contact(conn, phone, name):
@@ -277,6 +296,18 @@ def fetch_message_count(_conn):
     with _conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM messages")
         return cur.fetchone()[0]
+
+def toggle_star(conn, message_id):
+    conn = ensure_connection(conn)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE messages SET starred = NOT starred WHERE id = %s", (message_id,))
+    conn.commit()
+
+def delete_message_by_id(conn, message_id):
+    conn = ensure_connection(conn)
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM messages WHERE id = %s", (message_id,))
+    conn.commit()
 
 st_autorefresh(interval=60000, key="messages_refresh")
 
@@ -419,10 +450,40 @@ def upload_audio_and_get_url(ogg_bytes: bytes) -> str:
     return response.json()["url"]
 
 # -----------------------------
+# ✅ Send-message helper (reused by composer + forward)
+# -----------------------------
+def send_text_or_media(recipient_value, message_body, media_link, caption, msg_type, api_url, reply_wamid=None):
+    headers = {
+        "Authorization": f"App {API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    message_id = str(uuid.uuid4())
+    content = {"text": message_body} if msg_type == "text" else {"mediaUrl": media_link, "caption": caption}
+    payload = {
+        "from": SANDBOX_NUMBER,
+        "to": recipient_value,
+        "messageId": message_id,
+        "content": content,
+        "callbackData": "Callback data",
+        "notifyUrl": f"{FASTAPI_PROXY_BASE}/whatsapp/inbound",
+        "urlOptions": {
+            "shortenUrl": True,
+            "trackClicks": False,
+            "removeProtocol": True
+        }
+    }
+    # ✅ Best-guess contextual-reply field — verify with a real test send
+    if reply_wamid:
+        payload["context"] = {"messageId": reply_wamid}
+
+    return requests.post(api_url, headers=headers, json=payload, timeout=15)
+
+# -----------------------------
 # Bubble rendering
 # -----------------------------
 def render_bubble(msg_row, show_header: bool):
-    _, phone, message_text, direction, timestamp, msg_type, media_link, caption = msg_row
+    msg_id, phone, message_text, direction, timestamp, msg_type, media_link, caption, starred, wamid = msg_row
     display_name = contacts.get(phone, phone)
     is_inbound   = direction == "inbound"
     align        = "flex-start" if is_inbound else "flex-end"
@@ -447,6 +508,7 @@ def render_bubble(msg_row, show_header: bool):
                 content_html += f"<div style='margin-top:6px'>{caption}</div>"
 
     ticks_html = " <span style='color:#34B7F1;'>&#10003;&#10003;</span>" if not is_inbound else ""
+    star_html = " ⭐" if starred else ""
     avatar_html = render_avatar(display_name, phone) if (show_header and is_inbound) else "<div style='width:36px; flex-shrink:0;'></div>"
     header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
 
@@ -454,17 +516,65 @@ def render_bubble(msg_row, show_header: bool):
     right_avatar = avatar_html if not is_inbound else ""
 
     bubble = (
-        f"<div style='display:flex; justify-content:{align}; margin:4px 0; align-items:flex-end; gap:8px;'>"
+        f"<div style='display:flex; justify-content:{align}; margin:4px 0 0 0; align-items:flex-end; gap:8px;'>"
         f"{left_avatar}"
         f"<div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
         f"{header_html}"
         f"{content_html}"
-        f"<div style='text-align:right; font-size:11px; color:#667781; margin-top:4px;'>{time_str}{ticks_html}</div>"
+        f"<div style='text-align:right; font-size:11px; color:#667781; margin-top:4px;'>{time_str}{ticks_html}{star_html}</div>"
         f"</div>"
         f"{right_avatar}"
         f"</div>"
     )
     st.markdown(bubble, unsafe_allow_html=True)
+
+    # ✅ Action row: star / reply / forward / delete
+    indent = "flex-end" if not is_inbound else "flex-start"
+    st.markdown(f"<div class='msg-action-row' style='display:flex; justify-content:{indent}; margin:0 0 4px 44px;'>", unsafe_allow_html=True)
+    a1, a2, a3, a4 = st.columns([1, 1, 1, 1])
+    with a1:
+        star_label = "⭐" if starred else "☆"
+        if st.button(star_label, key=f"star_{msg_id}"):
+            toggle_star(conn, msg_id)
+            st.cache_data.clear()
+            st.rerun()
+    with a2:
+        if st.button("↩️", key=f"reply_{msg_id}"):
+            preview = (message_text or f"[{msg_type}]")[:80]
+            st.session_state["reply_to"] = {"id": msg_id, "wamid": wamid, "preview": preview}
+            st.rerun()
+    with a3:
+        with st.popover("➡️"):
+            fwd_number = st.text_input("Forward to (number)", key=f"fwd_number_{msg_id}")
+            if st.button("Send forward", key=f"fwd_send_{msg_id}"):
+                fwd_number_clean = (fwd_number or "").strip()
+                if fwd_number_clean:
+                    if msg_type in ("text", "contact") or not msg_type:
+                        resp = send_text_or_media(fwd_number_clean, message_text or "", "", "", "text", TEXT_API_URL)
+                    else:
+                        api_map = {
+                            "image": IMAGE_API_URL, "video": VIDEO_API_URL,
+                            "document": DOCUMENT_API_URL, "voice": AUDIO_API_URL, "audio": AUDIO_API_URL,
+                        }
+                        resp = send_text_or_media(fwd_number_clean, "", media_link, caption or "", msg_type, api_map.get(msg_type, DOCUMENT_API_URL))
+                    if resp.status_code in (200, 201):
+                        insert_message(conn, fwd_number_clean, message_text or "", "outbound", msg_type, media_link or "", caption or "")
+                        st.cache_data.clear()
+                        st.success("Forwarded!")
+                        st.rerun()
+                    else:
+                        st.error(f"Forward failed: {resp.status_code} {resp.text}")
+                else:
+                    st.warning("Enter a number to forward to.")
+    with a4:
+        with st.popover("🗑️"):
+            st.write("Delete this message from your dashboard?")
+            st.caption("This does not delete it from the customer's WhatsApp.")
+            if st.button("Confirm delete", key=f"del_confirm_{msg_id}"):
+                delete_message_by_id(conn, msg_id)
+                st.cache_data.clear()
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def render_date_divider(label: str):
     divider = (
@@ -491,7 +601,7 @@ else:
     prev_phone = None
     prev_date = None
     for m in chat_messages:
-        _, phone, message_text, direction, timestamp, msg_type, media_link, caption = m
+        msg_id, phone, message_text, direction, timestamp, msg_type, media_link, caption, starred, wamid = m
 
         msg_date = timestamp.date() if hasattr(timestamp, "date") else timestamp
         if msg_date != prev_date:
@@ -523,7 +633,20 @@ components.html(
 )
 
 # -----------------------------
-# ✅ Message composer — "+" attach menu, text box, send button
+# ✅ Reply preview (if replying to a message)
+# -----------------------------
+if st.session_state.get("reply_to"):
+    reply_info = st.session_state["reply_to"]
+    col_preview, col_cancel = st.columns([6, 1])
+    with col_preview:
+        st.info(f"↩️ Replying to: {reply_info['preview']}")
+    with col_cancel:
+        if st.button("✖", key="cancel_reply_btn"):
+            st.session_state.pop("reply_to", None)
+            st.rerun()
+
+# -----------------------------
+# ✅ Message composer — "+" attach menu, voice, text box, send button
 # -----------------------------
 st.write("")
 
@@ -574,11 +697,12 @@ if send_clicked:
     media_url_value = (media_url or "").strip()
     media_caption_value = (media_caption or "").strip()
     captured_voice_bytes = st.session_state.get("captured_voice_bytes")
+    reply_info = st.session_state.get("reply_to")
+    reply_wamid = reply_info["wamid"] if reply_info else None
 
     if not recipient_value:
         st.warning("Please select or enter a recipient.")
     elif captured_voice_bytes:
-        # ✅ Voice note takes priority if recorded
         try:
             with st.spinner("Converting and uploading voice note..."):
                 ogg_bytes = convert_to_ogg_opus(captured_voice_bytes)
@@ -590,32 +714,14 @@ if send_clicked:
             st.success("✅ Voice note saved locally!")
 
             if API_ENABLED:
-                headers = {
-                    "Authorization": f"App {API_KEY}",
-                    "Content-Type": "application/json",
-                    "Accept": "application/json"
-                }
-                message_id = str(uuid.uuid4())
-                payload = {
-                    "from": SANDBOX_NUMBER,
-                    "to": recipient_value,
-                    "messageId": message_id,
-                    "content": {"mediaUrl": public_url},
-                    "callbackData": "Callback data",
-                    "notifyUrl": f"{FASTAPI_PROXY_BASE}/whatsapp/inbound",
-                    "urlOptions": {
-                        "shortenUrl": True,
-                        "trackClicks": False,
-                        "removeProtocol": True
-                    }
-                }
-                response = requests.post(AUDIO_API_URL, headers=headers, json=payload, timeout=15)
-                if response.status_code in (200, 201):
+                resp = send_text_or_media(recipient_value, "", public_url, "", "voice", AUDIO_API_URL)
+                if resp.status_code in (200, 201):
                     st.success(f"✅ Voice note sent to {recipient_value}!")
                 else:
-                    st.error(f"❌ API failed: {response.status_code} {response.text}")
+                    st.error(f"❌ API failed: {resp.status_code} {resp.text}")
 
             st.session_state.pop("captured_voice_bytes", None)
+            st.session_state.pop("reply_to", None)
             st.rerun()
         except Exception as e:
             st.error(f"⚠️ Voice note error: {e}")
@@ -650,36 +756,16 @@ if send_clicked:
         st.success("✅ Message saved locally!")
 
         if API_ENABLED:
-            headers = {
-                "Authorization": f"App {API_KEY}",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            message_id = str(uuid.uuid4())
-            payload = {
-                "from": SANDBOX_NUMBER,
-                "to": recipient_value,
-                "messageId": message_id,
-                "content": (
-                    {"text": message_body} if msg_type == "text"
-                    else {"mediaUrl": media_link, "caption": caption}
-                ),
-                "callbackData": "Callback data",
-                "notifyUrl": f"{FASTAPI_PROXY_BASE}/whatsapp/inbound",
-                "urlOptions": {
-                    "shortenUrl": True,
-                    "trackClicks": False,
-                    "removeProtocol": True
-                }
-            }
             try:
-                response = requests.post(api_url, headers=headers, json=payload, timeout=15)
-                if response.status_code in (200, 201):
+                resp = send_text_or_media(recipient_value, message_body, media_link, caption, msg_type, api_url, reply_wamid=reply_wamid)
+                if resp.status_code in (200, 201):
                     st.success(f"✅ Message sent successfully to {recipient_value}!")
                 else:
-                    st.error(f"❌ API failed: {response.status_code} {response.text}")
+                    st.error(f"❌ API failed: {resp.status_code} {resp.text}")
             except Exception as e:
                 st.error(f"⚠️ Connection error: {e}")
+
+        st.session_state.pop("reply_to", None)
         st.rerun()
     else:
         st.warning("Please fill recipient and message or media URL.")
