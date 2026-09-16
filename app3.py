@@ -87,10 +87,11 @@ def inject_whatsapp_theme():
             border-radius: 10px;
         }
 
-        /* Tighten spacing for the bubble/menu column rows */
+        /* ✅ Tightened (not zeroed) spacing for the bubble/menu column rows —
+           zeroing this completely was what made bubbles look glued together */
         div[data-testid="column"] {
-            padding-top: 0px;
-            padding-bottom: 0px;
+            padding-top: 2px;
+            padding-bottom: 2px;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -555,8 +556,13 @@ def render_bubble(msg_row, show_header: bool):
     header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
 
     justify = "flex-start" if is_inbound else "flex-end"
+
+    # ✅ Grouping-aware spacing: tight gap within a group of consecutive
+    # messages from the same sender, wider gap when a new group starts.
+    bottom_margin = "3px" if not show_header else "12px"
+
     bubble_inner = (
-        f"<div style='display:flex; justify-content:{justify};'>"
+        f"<div style='display:flex; justify-content:{justify}; margin-bottom:{bottom_margin};'>"
         f"<div style='max-width:100%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
         f"{header_html}"
         f"{content_html}"
