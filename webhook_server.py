@@ -28,9 +28,6 @@ if not DATABASE_URL:
     logging.error("DATABASE_URL not set. Exiting.")
     raise RuntimeError("DATABASE_URL is required")
 
-# -----------------------------
-# ✅ Audio upload storage
-# -----------------------------
 AUDIO_UPLOAD_DIR = Path("uploaded_audio")
 AUDIO_UPLOAD_DIR.mkdir(exist_ok=True)
 app.mount("/audio-files", StaticFiles(directory=str(AUDIO_UPLOAD_DIR)), name="audio-files")
@@ -60,15 +57,27 @@ def ensure_db():
             caption TEXT
         )
         """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS link_clicks (
+            id SERIAL PRIMARY KEY,
+            message_id TEXT,
+            phone TEXT,
+            url TEXT,
+            clicked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            raw_payload TEXT
+        )
+        """)
+        c.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS starred BOOLEAN DEFAULT FALSE")
+        c.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS wamid TEXT")
         conn.commit()
     conn.close()
 
-def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption=""):
+def insert_message(conn, phone, message_text, direction, msg_type, media_link="", caption="", wamid=""):
     with conn.cursor() as cursor:
         cursor.execute("""
-            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption))
+            INSERT INTO messages (phone, message, direction, timestamp, message_type, media_link, caption, wamid)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """, (phone, message_text, direction, datetime.utcnow(), msg_type, media_link, caption, wamid))
     conn.commit()
 
 def upsert_contact(conn, phone, name):
@@ -80,15 +89,20 @@ def upsert_contact(conn, phone, name):
         """, (phone, name))
     conn.commit()
 
+def insert_click_event(conn, message_id, phone, url, raw_payload):
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO link_clicks (message_id, phone, url, clicked_at, raw_payload)
+            VALUES (%s, %s, %s, %s, %s)
+        """, (message_id, phone, url, datetime.utcnow(), raw_payload))
+    conn.commit()
+
 ensure_db()
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
-# -----------------------------
-# ✅ Audio upload endpoint
-# -----------------------------
 @app.post("/upload-audio")
 async def upload_audio(request: Request, file: UploadFile = File(...)):
     try:
@@ -101,6 +115,31 @@ async def upload_audio(request: Request, file: UploadFile = File(...)):
         return {"url": public_url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+@app.post("/whatsapp/click-report")
+async def click_report(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        try:
+            raw_body = await request.body()
+            payload = {"raw_text": raw_body.decode("utf-8", errors="replace")}
+        except Exception:
+            payload = {}
+
+    logging.info("RAW CLICK PAYLOAD: %s", json.dumps(payload, default=str))
+
+    message_id = payload.get("messageId") or payload.get("bulkId") or payload.get("message_id") or ""
+    phone = payload.get("to") or payload.get("from") or payload.get("recipient") or payload.get("phone") or ""
+    url = payload.get("url") or payload.get("originalUrl") or payload.get("clickedUrl") or ""
+
+    conn = get_pg_connection()
+    try:
+        insert_click_event(conn, str(message_id), str(phone), str(url), json.dumps(payload, default=str))
+    finally:
+        conn.close()
+
+    return {"status": "ok"}
 
 def extract_media_id_from_url(url: str) -> str:
     try:
@@ -116,6 +155,8 @@ def parse_infobip_message(msg):
     contact_name = msg.get("contact", {}).get("name", "").strip() or sender
     content = msg.get("message", {}) or {}
     msg_type_raw = str(content.get("type", "TEXT")).upper()
+
+    wamid = msg.get("messageId") or msg.get("id") or ""
 
     text = ""
     media_identifier = ""
@@ -163,7 +204,6 @@ def parse_infobip_message(msg):
             parts.append(f"{display_name} ({phone_str})")
 
         text = "📇 Shared contact: " + "; ".join(parts) if parts else "📇 Shared a contact card"
-
         logging.info("RAW CONTACT PAYLOAD: %s", json.dumps(msg, default=str))
 
     else:
@@ -174,7 +214,7 @@ def parse_infobip_message(msg):
             text = f"[Unsupported message type: {msg_type_raw}]"
             logging.info("RAW UNHANDLED PAYLOAD (%s): %s", msg_type_raw, json.dumps(msg, default=str))
 
-    return text, msg_type, media_identifier, caption, sender, contact_name
+    return text, msg_type, media_identifier, caption, sender, contact_name, wamid
 
 @app.post("/whatsapp/inbound")
 async def inbound(request: Request):
@@ -194,9 +234,9 @@ async def inbound(request: Request):
             parsed = parse_infobip_message(msg)
             if not parsed:
                 continue
-            text, msg_type, media_id, caption, sender, name = parsed
+            text, msg_type, media_id, caption, sender, name, wamid = parsed
             upsert_contact(conn, sender, name)
-            insert_message(conn, sender, text, "inbound", msg_type, media_id, caption)
+            insert_message(conn, sender, text, "inbound", msg_type, media_id, caption, wamid)
             received += 1
         return {"status": "ok", "received": received}
     finally:
