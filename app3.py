@@ -86,6 +86,12 @@ def inject_whatsapp_theme():
             background: #B7C2BE;
             border-radius: 10px;
         }
+
+        /* Tighten spacing for the bubble/menu column rows */
+        div[data-testid="column"] {
+            padding-top: 0px;
+            padding-bottom: 0px;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -464,58 +470,10 @@ def send_text_or_media(recipient_value, message_body, media_link, caption, msg_t
     return requests.post(api_url, headers=headers, json=payload, timeout=15)
 
 # -----------------------------
-# Bubble rendering
+# ✅ Per-message "⋮" menu (Reply / Star / Forward / Delete)
 # -----------------------------
-def render_bubble(msg_row, show_header: bool):
-    msg_id, phone, message_text, direction, timestamp, msg_type, media_link, caption, starred, wamid = msg_row
-    display_name = contacts.get(phone, phone)
-    is_inbound   = direction == "inbound"
-    align        = "flex-start" if is_inbound else "flex-end"
-    bg           = "#FFFFFF" if is_inbound else "#DCF8C6"
-    time_str     = format_time_only(timestamp)
-
-    content_html = "<i>No content</i>"
-    if msg_type in ("text", "contact") or not msg_type:
-        content_html = message_text or "<i>No text content</i>"
-    elif msg_type in ("image", "video", "document", "voice", "audio"):
-        if media_link:
-            proxy = build_proxy_url(media_link, direction)
-            if msg_type == "image":
-                content_html = f"<a href='{proxy}' target='_blank'><img src='{proxy}' style='max-width:220px; border-radius:8px; border:1px solid #ddd;'></a>"
-            elif msg_type == "video":
-                content_html = f"<a href='{proxy}' target='_blank'>View Video</a><br><video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
-            elif msg_type in ("voice", "audio"):
-                content_html = f"<audio controls><source src='{proxy}' type='audio/ogg'></audio>"
-            elif msg_type == "document":
-                content_html = f"<a href='{proxy}' target='_blank'>Open Document</a>"
-            if caption:
-                content_html += f"<div style='margin-top:6px'>{caption}</div>"
-
-    ticks_html = " <span style='color:#34B7F1;'>&#10003;&#10003;</span>" if not is_inbound else ""
-    star_html = " ⭐" if starred else ""
-    avatar_html = render_avatar(display_name, phone) if (show_header and is_inbound) else "<div style='width:36px; flex-shrink:0;'></div>"
-    header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
-
-    left_avatar = avatar_html if is_inbound else ""
-    right_avatar = avatar_html if not is_inbound else ""
-
-    bubble = (
-        f"<div style='display:flex; justify-content:{align}; margin:4px 0 0 0; align-items:flex-end; gap:8px;'>"
-        f"{left_avatar}"
-        f"<div style='max-width:70%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
-        f"{header_html}"
-        f"{content_html}"
-        f"<div style='text-align:right; font-size:11px; color:#667781; margin-top:4px;'>{time_str}{ticks_html}{star_html}</div>"
-        f"</div>"
-        f"{right_avatar}"
-        f"</div>"
-    )
-    st.markdown(bubble, unsafe_allow_html=True)
-
-    # ✅ Single "⋮" dropdown menu, WhatsApp-style
-    indent = "flex-end" if not is_inbound else "flex-start"
-    st.markdown(f"<div style='display:flex; justify-content:{indent}; margin:0 0 6px 44px;'>", unsafe_allow_html=True)
-    with st.popover("⋮", use_container_width=False):
+def render_menu_popover(msg_id, message_text, msg_type, media_link, caption, wamid, starred):
+    with st.popover("⋮"):
         if st.button("↩️ Reply", key=f"reply_{msg_id}", use_container_width=True):
             preview = (message_text or f"[{msg_type}]")[:80]
             st.session_state["reply_to"] = {"id": msg_id, "wamid": wamid, "preview": preview}
@@ -563,7 +521,66 @@ def render_bubble(msg_row, show_header: bool):
             if st.button("🗑️ Delete", key=f"del_start_{msg_id}", use_container_width=True):
                 st.session_state[f"confirm_delete_{msg_id}"] = True
                 st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+
+# -----------------------------
+# Bubble rendering
+# -----------------------------
+def render_bubble(msg_row, show_header: bool):
+    msg_id, phone, message_text, direction, timestamp, msg_type, media_link, caption, starred, wamid = msg_row
+    display_name = contacts.get(phone, phone)
+    is_inbound   = direction == "inbound"
+    bg           = "#FFFFFF" if is_inbound else "#DCF8C6"
+    time_str     = format_time_only(timestamp)
+
+    content_html = "<i>No content</i>"
+    if msg_type in ("text", "contact") or not msg_type:
+        content_html = message_text or "<i>No text content</i>"
+    elif msg_type in ("image", "video", "document", "voice", "audio"):
+        if media_link:
+            proxy = build_proxy_url(media_link, direction)
+            if msg_type == "image":
+                content_html = f"<a href='{proxy}' target='_blank'><img src='{proxy}' style='max-width:220px; border-radius:8px; border:1px solid #ddd;'></a>"
+            elif msg_type == "video":
+                content_html = f"<a href='{proxy}' target='_blank'>View Video</a><br><video width='260' controls><source src='{proxy}' type='video/mp4'></video>"
+            elif msg_type in ("voice", "audio"):
+                content_html = f"<audio controls><source src='{proxy}' type='audio/ogg'></audio>"
+            elif msg_type == "document":
+                content_html = f"<a href='{proxy}' target='_blank'>Open Document</a>"
+            if caption:
+                content_html += f"<div style='margin-top:6px'>{caption}</div>"
+
+    ticks_html = " <span style='color:#34B7F1;'>&#10003;&#10003;</span>" if not is_inbound else ""
+    star_html = " ⭐" if starred else ""
+    avatar_html = render_avatar(display_name, phone) if (show_header and is_inbound) else "<div style='width:36px; flex-shrink:0;'></div>"
+    header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
+
+    justify = "flex-start" if is_inbound else "flex-end"
+    bubble_inner = (
+        f"<div style='display:flex; justify-content:{justify};'>"
+        f"<div style='max-width:100%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
+        f"{header_html}"
+        f"{content_html}"
+        f"<div style='text-align:right; font-size:11px; color:#667781; margin-top:4px;'>{time_str}{ticks_html}{star_html}</div>"
+        f"</div>"
+        f"</div>"
+    )
+
+    if is_inbound:
+        col_avatar, col_bubble, col_menu = st.columns([1, 7, 1])
+        with col_avatar:
+            st.markdown(avatar_html, unsafe_allow_html=True)
+        with col_bubble:
+            st.markdown(bubble_inner, unsafe_allow_html=True)
+        with col_menu:
+            render_menu_popover(msg_id, message_text, msg_type, media_link, caption, wamid, starred)
+    else:
+        col_menu, col_bubble, col_avatar = st.columns([1, 7, 1])
+        with col_menu:
+            render_menu_popover(msg_id, message_text, msg_type, media_link, caption, wamid, starred)
+        with col_bubble:
+            st.markdown(bubble_inner, unsafe_allow_html=True)
+        with col_avatar:
+            st.markdown(avatar_html, unsafe_allow_html=True)
 
 def render_date_divider(label: str):
     divider = (
