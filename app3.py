@@ -87,11 +87,10 @@ def inject_whatsapp_theme():
             border-radius: 10px;
         }
 
-        /* ✅ Tightened (not zeroed) spacing for the bubble/menu column rows —
-           zeroing this completely was what made bubbles look glued together */
+        /* Tighten spacing for the bubble/menu column rows */
         div[data-testid="column"] {
-            padding-top: 2px;
-            padding-bottom: 2px;
+            padding-top: 0px;
+            padding-bottom: 0px;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -535,7 +534,8 @@ def render_bubble(msg_row, show_header: bool):
 
     content_html = "<i>No content</i>"
     if msg_type in ("text", "contact") or not msg_type:
-        content_html = message_text or "<i>No text content</i>"
+        # ✅ Preserve line breaks typed with the Enter key
+        content_html = (message_text or "<i>No text content</i>").replace("\n", "<br>")
     elif msg_type in ("image", "video", "document", "voice", "audio"):
         if media_link:
             proxy = build_proxy_url(media_link, direction)
@@ -556,13 +556,8 @@ def render_bubble(msg_row, show_header: bool):
     header_html = f"<b>{display_name} ({phone})</b><br>" if show_header else ""
 
     justify = "flex-start" if is_inbound else "flex-end"
-
-    # ✅ Grouping-aware spacing: tight gap within a group of consecutive
-    # messages from the same sender, wider gap when a new group starts.
-    bottom_margin = "3px" if not show_header else "12px"
-
     bubble_inner = (
-        f"<div style='display:flex; justify-content:{justify}; margin-bottom:{bottom_margin};'>"
+        f"<div style='display:flex; justify-content:{justify};'>"
         f"<div style='max-width:100%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
         f"{header_html}"
         f"{content_html}"
@@ -695,10 +690,12 @@ with col_form:
     with st.form(key="send_message_form", clear_on_submit=True):
         col_input, col_send = st.columns([6, 1])
         with col_input:
-            message_text = st.text_input(
+            # ✅ Multi-line box: Enter = new line, send with the ➤ button (or Ctrl+Enter)
+            message_text = st.text_area(
                 "Message",
                 placeholder="Type a message",
                 label_visibility="collapsed",
+                height=68,
             )
         with col_send:
             send_clicked = st.form_submit_button("➤")
