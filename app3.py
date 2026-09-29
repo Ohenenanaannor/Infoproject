@@ -87,10 +87,10 @@ def inject_whatsapp_theme():
             border-radius: 10px;
         }
 
-        /* Tighten spacing for the bubble/menu column rows */
+        /* Spacing for the bubble/menu column rows */
         div[data-testid="column"] {
-            padding-top: 0px;
-            padding-bottom: 0px;
+            padding-top: 4px;
+            padding-bottom: 4px;
         }
     </style>
     """, unsafe_allow_html=True)
@@ -534,7 +534,6 @@ def render_bubble(msg_row, show_header: bool):
 
     content_html = "<i>No content</i>"
     if msg_type in ("text", "contact") or not msg_type:
-        # ✅ Preserve line breaks typed with the Enter key
         content_html = (message_text or "<i>No text content</i>").replace("\n", "<br>")
     elif msg_type in ("image", "video", "document", "voice", "audio"):
         if media_link:
@@ -557,7 +556,7 @@ def render_bubble(msg_row, show_header: bool):
 
     justify = "flex-start" if is_inbound else "flex-end"
     bubble_inner = (
-        f"<div style='display:flex; justify-content:{justify};'>"
+        f"<div style='display:flex; justify-content:{justify}; margin-bottom:8px;'>"
         f"<div style='max-width:100%; background:{bg}; padding:8px 10px; border-radius:10px; box-shadow:0 1px 2px rgba(0,0,0,0.15);'>"
         f"{header_html}"
         f"{content_html}"
@@ -690,7 +689,6 @@ with col_form:
     with st.form(key="send_message_form", clear_on_submit=True):
         col_input, col_send = st.columns([6, 1])
         with col_input:
-            # ✅ Multi-line box: Enter = new line, send with the ➤ button (or Ctrl+Enter)
             message_text = st.text_area(
                 "Message",
                 placeholder="Type a message",
